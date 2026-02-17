@@ -1,0 +1,12 @@
+.DS_Store
+
+# Rust
+/target
+
+# Node
+node_modules
+.pnpm-store
+
+# Build artifacts
+dist
+coverage

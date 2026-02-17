@@ -1,0 +1,8 @@
+[package]
+name = "valhall-net"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+valhall-events = { path = "../valhall-events" }
