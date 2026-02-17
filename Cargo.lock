@@ -1801,6 +1801,7 @@ dependencies = [
  "serde_json",
  "skip-core",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
 ]
@@ -1823,6 +1824,7 @@ dependencies = [
 name = "skipd"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "chrono",
  "clap",
  "prost",
@@ -1832,6 +1834,7 @@ dependencies = [
  "skip-core",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "tracing",
