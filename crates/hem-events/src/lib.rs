@@ -16,6 +16,13 @@ pub mod topics {
     pub const VIS_IDENTITY_CREATED: &str = "vis.identity.created";
     pub const VIS_MEMORY_STORED: &str = "vis.memory.stored";
     pub const VIS_CONTEXT_INJECTED: &str = "vis.context.injected";
+
+    pub const SMI_AGENT_STARTED: &str = "smi.agent.started";
+    pub const SMI_AGENT_COMPLETED: &str = "smi.agent.completed";
+    pub const SMI_AGENT_ERRORED: &str = "smi.agent.errored";
+    pub const SMI_AGENT_STOPPED: &str = "smi.agent.stopped";
+    pub const SMI_LOOP_ITERATION: &str = "smi.loop.iteration";
+    pub const SMI_LOOP_STOP_CONDITION_EVALUATED: &str = "smi.loop.stop_condition_evaluated";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,5 +65,10 @@ mod tests {
         assert_eq!(topics::SKIP_CREATED, "skip.created");
         assert_eq!(topics::BOD_ROOT_CREATED, "bod.root.created");
         assert_eq!(topics::VIS_CONTEXT_INJECTED, "vis.context.injected");
+        assert_eq!(topics::SMI_AGENT_STARTED, "smi.agent.started");
+        assert_eq!(
+            topics::SMI_LOOP_STOP_CONDITION_EVALUATED,
+            "smi.loop.stop_condition_evaluated"
+        );
     }
 }
