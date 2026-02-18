@@ -1,3 +1,21 @@
+pub mod ids {
+    pub const CANONICAL_ULID_LENGTH: usize = 26;
+    const ULID_TIMESTAMP_LENGTH: usize = 10;
+
+    pub fn generate_entropy_prefixed_ulid() -> String {
+        reorder_ulid_for_entropy_prefix(ulid::Ulid::new().to_string().to_lowercase().as_str())
+    }
+
+    pub fn reorder_ulid_for_entropy_prefix(canonical: &str) -> String {
+        if canonical.len() != CANONICAL_ULID_LENGTH {
+            return canonical.to_string();
+        }
+
+        let (timestamp, entropy) = canonical.split_at(ULID_TIMESTAMP_LENGTH);
+        format!("{entropy}{timestamp}")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServiceDescriptor {
     pub service: &'static str,
@@ -37,5 +55,21 @@ mod tests {
         assert_eq!(SPRINT_1_SERVICES.len(), 4);
         assert_eq!(SPRINT_1_SERVICES[0].service, "smi");
         assert_eq!(SPRINT_1_SERVICES[3].daemon, "skipd");
+    }
+
+    #[test]
+    fn ulid_reordering_places_entropy_first() {
+        let canonical = "01arz3ndektsv4rrffq69g5fav";
+        let reordered = ids::reorder_ulid_for_entropy_prefix(canonical);
+        assert_eq!(reordered, "tsv4rrffq69g5fav01arz3ndek");
+    }
+
+    #[test]
+    fn generated_entropy_prefixed_ulid_has_expected_shape() {
+        let value = ids::generate_entropy_prefixed_ulid();
+        assert_eq!(value.len(), ids::CANONICAL_ULID_LENGTH);
+        assert!(value
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()));
     }
 }
