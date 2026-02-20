@@ -10,3 +10,7 @@ node_modules
 # Build artifacts
 dist
 coverage
+
+# Local secrets
+.valhall.openai.key
+.vallhall.openai.key
