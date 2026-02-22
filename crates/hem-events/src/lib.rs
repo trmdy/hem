@@ -23,6 +23,14 @@ pub mod topics {
     pub const SMI_AGENT_STOPPED: &str = "smi.agent.stopped";
     pub const SMI_LOOP_ITERATION: &str = "smi.loop.iteration";
     pub const SMI_LOOP_STOP_CONDITION_EVALUATED: &str = "smi.loop.stop_condition_evaluated";
+
+    pub const HEM_SECRET_READ: &str = "hem.secret.read";
+    pub const HEM_SECRET_WRITTEN: &str = "hem.secret.written";
+    pub const HEM_SECRET_DELETED: &str = "hem.secret.deleted";
+    pub const HEM_TOKEN_ISSUED: &str = "hem.token.issued";
+    pub const HEM_TOKEN_REVOKED: &str = "hem.token.revoked";
+    pub const HEM_APPROVAL_REQUESTED: &str = "hem.approval.requested";
+    pub const HEM_APPROVAL_RESOLVED: &str = "hem.approval.resolved";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,5 +78,7 @@ mod tests {
             topics::SMI_LOOP_STOP_CONDITION_EVALUATED,
             "smi.loop.stop_condition_evaluated"
         );
+        assert_eq!(topics::HEM_SECRET_WRITTEN, "hem.secret.written");
+        assert_eq!(topics::HEM_APPROVAL_REQUESTED, "hem.approval.requested");
     }
 }
