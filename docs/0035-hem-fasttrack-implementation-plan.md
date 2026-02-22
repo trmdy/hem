@@ -1,7 +1,7 @@
 # 0035 - Fast-Track Implementation Plan: `hem`
 
 Date: 2026-02-21  
-Status: In progress
+Status: Closed (see `docs/0044-hem-v1-readiness-closure.md`)
 Owner: Hem stream
 
 ## Decision
