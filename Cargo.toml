@@ -21,6 +21,8 @@ members = [
   "crates/vis",
   "crates/vis-core",
   "crates/visd",
+  "crates/fj",
+  "crates/fjell-core",
 ]
 
 [workspace.package]
