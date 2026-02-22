@@ -69,6 +69,17 @@ struct RevokedTokenEntry {
     revoked_by: String,
 }
 
+#[derive(Debug)]
+struct IssueTokenInput {
+    token_type: TokenType,
+    ttl: Duration,
+    issued_by: String,
+    service_name: Option<String>,
+    identity_id: Option<String>,
+    project: Option<String>,
+    scopes: Vec<SecretScope>,
+}
+
 impl TokenManager {
     pub fn from_master_key(
         master_key: &MasterKey,
@@ -94,15 +105,15 @@ impl TokenManager {
     }
 
     pub fn issue_operator_token(&self, ttl: Duration, issued_by: &str) -> Result<IssuedToken> {
-        self.issue_token(
-            TokenType::Operator,
+        self.issue_token(IssueTokenInput {
+            token_type: TokenType::Operator,
             ttl,
-            issued_by,
-            None,
-            None,
-            None,
-            vec![SecretScope::Global],
-        )
+            issued_by: issued_by.to_string(),
+            service_name: None,
+            identity_id: None,
+            project: None,
+            scopes: vec![SecretScope::Global],
+        })
     }
 
     pub fn issue_service_token(
@@ -112,15 +123,15 @@ impl TokenManager {
         issued_by: &str,
     ) -> Result<IssuedToken> {
         validate_subject("service_name", service_name.as_str())?;
-        self.issue_token(
-            TokenType::Service,
+        self.issue_token(IssueTokenInput {
+            token_type: TokenType::Service,
             ttl,
-            issued_by,
-            Some(service_name),
-            None,
-            None,
-            vec![SecretScope::Global],
-        )
+            issued_by: issued_by.to_string(),
+            service_name: Some(service_name),
+            identity_id: None,
+            project: None,
+            scopes: vec![SecretScope::Global],
+        })
     }
 
     pub fn issue_agent_token(
@@ -153,15 +164,15 @@ impl TokenManager {
             scope.validate()?;
         }
 
-        self.issue_token(
-            TokenType::AgentRun,
+        self.issue_token(IssueTokenInput {
+            token_type: TokenType::AgentRun,
             ttl,
-            issued_by_service,
-            None,
+            issued_by: issued_by_service.to_string(),
+            service_name: None,
             identity_id,
             project,
             scopes,
-        )
+        })
     }
 
     pub fn verify_token(&self, token: &str) -> Result<TokenClaims> {
@@ -258,52 +269,25 @@ impl TokenManager {
         write_json_atomic(self.revoked_tokens_path().as_path(), &revoked)
     }
 
-    fn issue_token(
-        &self,
-        token_type: TokenType,
-        ttl: Duration,
-        issued_by: &str,
-        service_name: Option<String>,
-        identity_id: Option<String>,
-        project: Option<String>,
-        scopes: Vec<SecretScope>,
-    ) -> Result<IssuedToken> {
+    fn issue_token(&self, input: IssueTokenInput) -> Result<IssuedToken> {
         let now = Utc::now();
-        self.issue_token_at(
-            token_type,
-            ttl,
-            issued_by,
-            service_name,
-            identity_id,
-            project,
-            scopes,
-            now,
-        )
+        self.issue_token_at(input, now)
     }
 
-    fn issue_token_at(
-        &self,
-        token_type: TokenType,
-        ttl: Duration,
-        issued_by: &str,
-        service_name: Option<String>,
-        identity_id: Option<String>,
-        project: Option<String>,
-        scopes: Vec<SecretScope>,
-        now: DateTime<Utc>,
-    ) -> Result<IssuedToken> {
-        let issued_by = normalized_actor(issued_by);
-        let ttl_chrono = chrono::Duration::from_std(ttl).map_err(|_| HemError::TokenTtlExceeded)?;
+    fn issue_token_at(&self, input: IssueTokenInput, now: DateTime<Utc>) -> Result<IssuedToken> {
+        let issued_by = normalized_actor(input.issued_by.as_str());
+        let ttl_chrono =
+            chrono::Duration::from_std(input.ttl).map_err(|_| HemError::TokenTtlExceeded)?;
         let claims = TokenClaims {
             token_id: valhall_config::ids::generate_prefixed_entropy_id("tok"),
-            token_type,
+            token_type: input.token_type,
             issued_at: now,
             expires_at: now + ttl_chrono,
             issued_by,
-            service_name,
-            identity_id,
-            project,
-            scopes,
+            service_name: input.service_name,
+            identity_id: input.identity_id,
+            project: input.project,
+            scopes: input.scopes,
         };
 
         let token = sign_claims(&claims, self.sign_key.as_slice())?;
@@ -556,13 +540,15 @@ mod tests {
         let (manager, _root) = setup_manager();
         let issued = manager
             .issue_token_at(
-                TokenType::Operator,
-                Duration::from_secs(10),
-                "operator",
-                None,
-                None,
-                None,
-                vec![SecretScope::Global],
+                IssueTokenInput {
+                    token_type: TokenType::Operator,
+                    ttl: Duration::from_secs(10),
+                    issued_by: "operator".to_string(),
+                    service_name: None,
+                    identity_id: None,
+                    project: None,
+                    scopes: vec![SecretScope::Global],
+                },
                 Utc::now() - chrono::Duration::hours(2),
             )
             .expect("issue");
@@ -612,13 +598,15 @@ mod tests {
             .expect("issue active");
         let expired = manager
             .issue_token_at(
-                TokenType::Service,
-                Duration::from_secs(120),
-                "operator",
-                Some("vis".to_string()),
-                None,
-                None,
-                vec![SecretScope::Global],
+                IssueTokenInput {
+                    token_type: TokenType::Service,
+                    ttl: Duration::from_secs(120),
+                    issued_by: "operator".to_string(),
+                    service_name: Some("vis".to_string()),
+                    identity_id: None,
+                    project: None,
+                    scopes: vec![SecretScope::Global],
+                },
                 Utc::now() - chrono::Duration::hours(1),
             )
             .expect("issue expired");
