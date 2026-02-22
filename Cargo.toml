@@ -16,6 +16,7 @@ members = [
   "crates/smid",
   "crates/hem",
   "crates/hem-core",
+  "crates/hem-client",
   "crates/hemd",
   "crates/vis",
   "crates/vis-core",
