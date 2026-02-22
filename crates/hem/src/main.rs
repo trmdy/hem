@@ -1,3 +1,5 @@
+#![allow(clippy::large_enum_variant)]
+
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
@@ -1075,7 +1077,7 @@ async fn connect_client(
 fn resolve_auth_token(override_value: Option<String>) -> Option<String> {
     override_value
         .or_else(|| std::env::var("VALHALL_HEM_TOKEN").ok())
-        .and_then(|value| normalize_optional_string(value))
+        .and_then(normalize_optional_string)
         .or_else(load_operator_token)
 }
 

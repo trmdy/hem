@@ -1,3 +1,6 @@
+#![allow(clippy::result_large_err)]
+#![allow(clippy::large_enum_variant)]
+
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -17,11 +20,15 @@ use hem_core::{
     ScopeResolutionContext, SecretInfo as CoreSecretInfo, SecretScope,
     SecretWithValues as CoreSecretWithValues, SetSecretInput, TokenClaims, TokenType,
 };
+use serde::Serialize;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+use valhall_events::topics;
+use valhall_net::{Mesh, MeshConfig};
 
 pub mod proto {
+    #![allow(clippy::large_enum_variant)]
     tonic::include_proto!("valhall.hem.v1");
 }
 
@@ -48,6 +55,8 @@ const DEFAULT_HEM_SUBDIR: &str = ".valhall/hem";
 const DEFAULT_AGENT_TOKEN_TTL_SECS: u64 = 60 * 60;
 const DEFAULT_SERVICE_TOKEN_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const DEFAULT_OPERATOR_TOKEN_TTL_SECS: u64 = 365 * 24 * 60 * 60;
+const DEFAULT_APPROVAL_WAIT_TIMEOUT_MS: u64 = 5 * 60 * 1_000;
+const APPROVAL_WAIT_POLL_INTERVAL_MS: u64 = 200;
 const AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const APPROVAL_RECEIPT_METADATA_KEY: &str = "x-hem-approval-receipt";
 const DEFAULT_GET_APPROVAL_REASON: &str = "read requires approval";
@@ -64,18 +73,20 @@ struct Cli {
     once: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct HemRuntimeService {
     data_dir: PathBuf,
     approval_provider: Arc<dyn ApprovalProvider>,
+    mesh: Option<Arc<Mesh>>,
 }
 
 impl HemRuntimeService {
-    fn new(data_dir: PathBuf) -> Self {
+    fn new(data_dir: PathBuf, mesh: Option<Arc<Mesh>>) -> Self {
         let approval_provider = Arc::new(LocalApprovalProvider::new(data_dir.clone()));
         Self {
             data_dir,
             approval_provider,
+            mesh,
         }
     }
 
@@ -215,6 +226,49 @@ impl HemRuntimeService {
 
         if let Err(err) = audit_store.append(&entry) {
             warn!(error = %err, "failed to append audit entry");
+        }
+    }
+
+    async fn emit_event_payload(&self, topic: &str, payload: impl Serialize) {
+        let Some(mesh) = &self.mesh else {
+            return;
+        };
+        match serde_json::to_vec(&payload) {
+            Ok(bytes) => {
+                if let Err(err) = mesh.emit(topic, bytes.as_slice()).await {
+                    warn!(error = %err, topic = topic, "failed to emit hem event");
+                }
+            }
+            Err(err) => warn!(error = %err, topic = topic, "failed to encode hem event payload"),
+        }
+    }
+
+    async fn wait_for_approval_record(
+        &self,
+        request_id: &str,
+        timeout_ms: u64,
+    ) -> Result<DeleteApprovalRecord, Status> {
+        let timeout_ms = if timeout_ms == 0 {
+            DEFAULT_APPROVAL_WAIT_TIMEOUT_MS
+        } else {
+            timeout_ms
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+
+        loop {
+            let record = self
+                .approval_provider
+                .get_request(request_id)
+                .map_err(status_from_hem)?;
+            if !matches!(record.state, CoreApprovalState::Pending) {
+                return Ok(record);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Status::deadline_exceeded(format!(
+                    "approval wait timed out: request_id={request_id}"
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(APPROVAL_WAIT_POLL_INTERVAL_MS)).await;
         }
     }
 }
@@ -375,6 +429,17 @@ impl HemRuntime for HemRuntimeService {
                     "pending_approval",
                     format!("request_id={}", pending.request_id).as_str(),
                 );
+                self.emit_event_payload(
+                    topics::HEM_APPROVAL_REQUESTED,
+                    serde_json::json!({
+                        "request_id": pending.request_id.as_str(),
+                        "action": "set_secret",
+                        "secret_scope": scope_label(&scope),
+                        "secret_name": name.as_str(),
+                        "requested_by": caller.token_id.as_str(),
+                    }),
+                )
+                .await;
                 return Err(Status::failed_precondition(format!(
                     "approval required for set_secret request_id={}",
                     pending.request_id
@@ -421,6 +486,15 @@ impl HemRuntime for HemRuntimeService {
             "ok",
             "",
         );
+        self.emit_event_payload(
+            topics::HEM_SECRET_WRITTEN,
+            serde_json::json!({
+                "scope": scope_label(&scope),
+                "name": name.as_str(),
+                "actor": caller.actor.as_str(),
+            }),
+        )
+        .await;
         Ok(Response::new(to_proto_secret_info(info)))
     }
 
@@ -459,34 +533,120 @@ impl HemRuntime for HemRuntimeService {
                         DEFAULT_GET_APPROVAL_REASON,
                     )
                     .map_err(status_from_hem)?;
+                let request_id = pending.request_id.clone();
                 self.audit(
                     &store,
                     Some(&caller),
                     "get_secret",
                     Some((&secret.info.scope, secret.info.name.as_str())),
                     "pending_approval",
-                    format!("request_id={}", pending.request_id).as_str(),
+                    format!("request_id={request_id}").as_str(),
                 );
-                return Ok(Response::new(GetSecretResponse {
-                    result: Some(get_secret_response::Result::Pending(
-                        proto::PendingApproval {
-                            request_id: pending.request_id,
-                            state: proto::ApprovalState::Pending as i32,
-                            message: "secret read requires approval".to_string(),
-                        },
-                    )),
-                }));
-            }
-
-            self.approval_provider
-                .consume_receipt(
-                    &secret.info.scope,
-                    secret.info.name.as_str(),
-                    "get_secret",
-                    approval_receipt.as_str(),
-                    caller.actor.as_str(),
+                self.emit_event_payload(
+                    topics::HEM_APPROVAL_REQUESTED,
+                    serde_json::json!({
+                        "request_id": request_id.as_str(),
+                        "action": "get_secret",
+                        "secret_scope": scope_label(&secret.info.scope),
+                        "secret_name": secret.info.name.as_str(),
+                        "requested_by": caller.token_id.as_str(),
+                    }),
                 )
-                .map_err(status_from_hem)?;
+                .await;
+
+                if req.async_read {
+                    return Ok(Response::new(GetSecretResponse {
+                        result: Some(get_secret_response::Result::Pending(
+                            proto::PendingApproval {
+                                request_id,
+                                state: proto::ApprovalState::Pending as i32,
+                                message: "secret read requires approval".to_string(),
+                            },
+                        )),
+                    }));
+                }
+
+                let resolved = match self
+                    .wait_for_approval_record(request_id.as_str(), req.wait_timeout_ms)
+                    .await
+                {
+                    Ok(record) => record,
+                    Err(err) => {
+                        self.audit(
+                            &store,
+                            Some(&caller),
+                            "get_secret",
+                            Some((&secret.info.scope, secret.info.name.as_str())),
+                            "approval_wait_timeout",
+                            format!("request_id={request_id}").as_str(),
+                        );
+                        return Err(err);
+                    }
+                };
+
+                match resolved.state {
+                    CoreApprovalState::Approved => {
+                        let receipt = resolved
+                            .approval_receipt
+                            .as_deref()
+                            .ok_or_else(|| Status::failed_precondition("approval receipt missing"))?
+                            .to_string();
+                        self.approval_provider
+                            .consume_receipt(
+                                &secret.info.scope,
+                                secret.info.name.as_str(),
+                                "get_secret",
+                                receipt.as_str(),
+                                caller.actor.as_str(),
+                            )
+                            .map_err(status_from_hem)?;
+                    }
+                    CoreApprovalState::Denied => {
+                        self.audit(
+                            &store,
+                            Some(&caller),
+                            "get_secret",
+                            Some((&secret.info.scope, secret.info.name.as_str())),
+                            "approval_denied",
+                            format!("request_id={}", resolved.request_id).as_str(),
+                        );
+                        return Err(Status::permission_denied(format!(
+                            "approval denied: request_id={} message={}",
+                            resolved.request_id, resolved.resolve_message
+                        )));
+                    }
+                    CoreApprovalState::TimedOut => {
+                        self.audit(
+                            &store,
+                            Some(&caller),
+                            "get_secret",
+                            Some((&secret.info.scope, secret.info.name.as_str())),
+                            "approval_timed_out",
+                            format!("request_id={}", resolved.request_id).as_str(),
+                        );
+                        return Err(Status::deadline_exceeded(format!(
+                            "approval timed out: request_id={}",
+                            resolved.request_id
+                        )));
+                    }
+                    CoreApprovalState::Pending => {
+                        return Err(Status::deadline_exceeded(format!(
+                            "approval wait timed out: request_id={}",
+                            resolved.request_id
+                        )));
+                    }
+                }
+            } else {
+                self.approval_provider
+                    .consume_receipt(
+                        &secret.info.scope,
+                        secret.info.name.as_str(),
+                        "get_secret",
+                        approval_receipt.as_str(),
+                        caller.actor.as_str(),
+                    )
+                    .map_err(status_from_hem)?;
+            }
         }
 
         if let Some(key) = normalize_optional_string(req.key) {
@@ -505,6 +665,15 @@ impl HemRuntime for HemRuntimeService {
             "ok",
             "",
         );
+        self.emit_event_payload(
+            topics::HEM_SECRET_READ,
+            serde_json::json!({
+                "scope": scope_label(&secret.info.scope),
+                "name": secret.info.name.as_str(),
+                "actor": caller.actor.as_str(),
+            }),
+        )
+        .await;
 
         Ok(Response::new(GetSecretResponse {
             result: Some(get_secret_response::Result::Secret(
@@ -570,6 +739,17 @@ impl HemRuntime for HemRuntimeService {
                 if deleted { "deleted" } else { "not_found" },
                 format!("request_id={request_id}").as_str(),
             );
+            if deleted {
+                self.emit_event_payload(
+                    topics::HEM_SECRET_DELETED,
+                    serde_json::json!({
+                        "scope": scope_label(&scope),
+                        "name": name.as_str(),
+                        "actor": caller.actor.as_str(),
+                    }),
+                )
+                .await;
+            }
             return Ok(Response::new(DeleteSecretResponse {
                 deleted,
                 approval_request_id: request_id,
@@ -596,6 +776,17 @@ impl HemRuntime for HemRuntimeService {
             "pending_approval",
             format!("request_id={}", pending.request_id).as_str(),
         );
+        self.emit_event_payload(
+            topics::HEM_APPROVAL_REQUESTED,
+            serde_json::json!({
+                "request_id": pending.request_id.as_str(),
+                "action": "delete_secret",
+                "secret_scope": scope_label(&scope),
+                "secret_name": name.as_str(),
+                "requested_by": caller.token_id.as_str(),
+            }),
+        )
+        .await;
         Ok(Response::new(DeleteSecretResponse {
             deleted: false,
             approval_request_id: pending.request_id,
@@ -658,6 +849,10 @@ impl HemRuntime for HemRuntimeService {
 
         let mut results = Vec::with_capacity(req.requests.len());
         for item in req.requests {
+            let async_read = item.async_read;
+            let wait_timeout_ms = item.wait_timeout_ms;
+            let approval_reason = normalize_optional_string(item.reason.clone())
+                .unwrap_or_else(|| DEFAULT_GET_APPROVAL_REASON.to_string());
             let result = match resolve_batch_secret_request(
                 &store,
                 item,
@@ -674,15 +869,87 @@ impl HemRuntime for HemRuntimeService {
                                     secret.info.name.clone(),
                                     "get_secret",
                                     caller.token_id.as_str(),
-                                    DEFAULT_GET_APPROVAL_REASON,
+                                    approval_reason.as_str(),
                                     DEFAULT_GET_APPROVAL_REASON,
                                 )
                                 .map_err(status_from_hem)?;
-                            secret_batch_result::Result::Pending(proto::PendingApproval {
-                                request_id: pending.request_id,
-                                state: proto::ApprovalState::Pending as i32,
-                                message: "secret read requires approval".to_string(),
-                            })
+                            let request_id = pending.request_id.clone();
+                            self.emit_event_payload(
+                                topics::HEM_APPROVAL_REQUESTED,
+                                serde_json::json!({
+                                    "request_id": request_id.as_str(),
+                                    "action": "get_secret",
+                                    "secret_scope": scope_label(&secret.info.scope),
+                                    "secret_name": secret.info.name.as_str(),
+                                    "requested_by": caller.token_id.as_str(),
+                                }),
+                            )
+                            .await;
+                            if async_read {
+                                secret_batch_result::Result::Pending(proto::PendingApproval {
+                                    request_id,
+                                    state: proto::ApprovalState::Pending as i32,
+                                    message: "secret read requires approval".to_string(),
+                                })
+                            } else {
+                                let resolved = self
+                                    .wait_for_approval_record(request_id.as_str(), wait_timeout_ms)
+                                    .await;
+                                match resolved {
+                                    Ok(record) => match record.state {
+                                        CoreApprovalState::Approved => {
+                                            let receipt = record
+                                                .approval_receipt
+                                                .as_deref()
+                                                .ok_or_else(|| {
+                                                    Status::failed_precondition(
+                                                        "approval receipt missing",
+                                                    )
+                                                })?;
+                                            self.approval_provider
+                                                .consume_receipt(
+                                                    &secret.info.scope,
+                                                    secret.info.name.as_str(),
+                                                    "get_secret",
+                                                    receipt,
+                                                    caller.actor.as_str(),
+                                                )
+                                                .map_err(status_from_hem)?;
+                                            secret_batch_result::Result::Secret(
+                                                to_proto_secret_with_values(secret),
+                                            )
+                                        }
+                                        CoreApprovalState::Denied => {
+                                            results.push(proto::SecretBatchResult {
+                                                result: None,
+                                                error: format!(
+                                                    "approval denied: request_id={} message={}",
+                                                    record.request_id, record.resolve_message
+                                                ),
+                                            });
+                                            continue;
+                                        }
+                                        CoreApprovalState::TimedOut
+                                        | CoreApprovalState::Pending => {
+                                            results.push(proto::SecretBatchResult {
+                                                result: None,
+                                                error: format!(
+                                                    "approval wait timed out: request_id={}",
+                                                    record.request_id
+                                                ),
+                                            });
+                                            continue;
+                                        }
+                                    },
+                                    Err(err) => {
+                                        results.push(proto::SecretBatchResult {
+                                            result: None,
+                                            error: err.message().to_string(),
+                                        });
+                                        continue;
+                                    }
+                                }
+                            }
                         } else {
                             self.approval_provider
                                 .consume_receipt(
@@ -855,6 +1122,15 @@ impl HemRuntime for HemRuntimeService {
             "ok",
             format!("token_id={}", issued.claims.token_id).as_str(),
         );
+        self.emit_event_payload(
+            topics::HEM_TOKEN_ISSUED,
+            serde_json::json!({
+                "token_id": issued.claims.token_id.as_str(),
+                "token_type": "agent_run",
+                "actor": caller.actor.as_str(),
+            }),
+        )
+        .await;
 
         Ok(Response::new(IssueTokenResponse {
             token: issued.token,
@@ -896,6 +1172,15 @@ impl HemRuntime for HemRuntimeService {
             "ok",
             format!("token_id={}", issued.claims.token_id).as_str(),
         );
+        self.emit_event_payload(
+            topics::HEM_TOKEN_ISSUED,
+            serde_json::json!({
+                "token_id": issued.claims.token_id.as_str(),
+                "token_type": "service",
+                "actor": caller.actor.as_str(),
+            }),
+        )
+        .await;
 
         Ok(Response::new(IssueTokenResponse {
             token: issued.token,
@@ -929,6 +1214,16 @@ impl HemRuntime for HemRuntimeService {
             if revoked { "revoked" } else { "not_found" },
             format!("token_id={token_id}").as_str(),
         );
+        if revoked {
+            self.emit_event_payload(
+                topics::HEM_TOKEN_REVOKED,
+                serde_json::json!({
+                    "token_id": token_id,
+                    "actor": caller.actor.as_str(),
+                }),
+            )
+            .await;
+        }
 
         Ok(Response::new(RevokeTokenResponse { revoked }))
     }
@@ -1117,6 +1412,18 @@ impl HemRuntime for HemRuntimeService {
             "approved",
             format!("request_id={} action={}", record.request_id, record.action).as_str(),
         );
+        self.emit_event_payload(
+            topics::HEM_APPROVAL_RESOLVED,
+            serde_json::json!({
+                "request_id": record.request_id.as_str(),
+                "state": "approved",
+                "action": record.action.as_str(),
+                "secret_scope": scope_label(&record.secret_scope),
+                "secret_name": record.secret_name.as_str(),
+                "actor": caller.actor.as_str(),
+            }),
+        )
+        .await;
 
         Ok(Response::new(ResolveApprovalResponse {
             request: Some(to_proto_approval_request_info(&record)),
@@ -1156,6 +1463,18 @@ impl HemRuntime for HemRuntimeService {
             "denied",
             format!("request_id={} action={}", record.request_id, record.action).as_str(),
         );
+        self.emit_event_payload(
+            topics::HEM_APPROVAL_RESOLVED,
+            serde_json::json!({
+                "request_id": record.request_id.as_str(),
+                "state": "denied",
+                "action": record.action.as_str(),
+                "secret_scope": scope_label(&record.secret_scope),
+                "secret_name": record.secret_name.as_str(),
+                "actor": caller.actor.as_str(),
+            }),
+        )
+        .await;
 
         Ok(Response::new(ResolveApprovalResponse {
             request: Some(to_proto_approval_request_info(&record)),
@@ -1925,19 +2244,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
     let data_dir = resolve_data_dir(cli.data_dir);
+    let initialized = match HemStore::open(data_dir.as_path()) {
+        Ok(_) => true,
+        Err(HemError::MissingMasterKey(_)) => {
+            info!(
+                data_dir = %data_dir.display(),
+                "hemd data dir ready; master key missing (run `hem init`)"
+            );
+            false
+        }
+        Err(err) => return Err(Box::new(err) as Box<dyn std::error::Error>),
+    };
+    let mut mesh = match Mesh::connect("hemd", MeshConfig::from_env().unwrap_or_default()).await {
+        Ok(mesh) => Some(Arc::new(mesh)),
+        Err(err) => {
+            warn!(error = %err, "mesh unavailable; continuing without hem event emission");
+            None
+        }
+    };
 
     if cli.once {
-        info!(bind = %cli.bind, data_dir = %data_dir.display(), "hemd bootstrap check complete");
+        info!(
+            bind = %cli.bind,
+            data_dir = %data_dir.display(),
+            initialized,
+            "hemd bootstrap check complete"
+        );
+        if let Some(mesh_handle) = mesh.take() {
+            if let Ok(mesh_owned) = Arc::try_unwrap(mesh_handle) {
+                let _ = mesh_owned.shutdown().await;
+            }
+        }
         return Ok(());
     }
 
     let addr: SocketAddr = cli.bind.parse()?;
-    info!(bind = %addr, data_dir = %data_dir.display(), "starting hemd");
+    info!(
+        bind = %addr,
+        data_dir = %data_dir.display(),
+        initialized,
+        "starting hemd"
+    );
 
     Server::builder()
-        .add_service(HemRuntimeServer::new(HemRuntimeService::new(data_dir)))
+        .add_service(HemRuntimeServer::new(HemRuntimeService::new(
+            data_dir,
+            mesh.clone(),
+        )))
         .serve(addr)
         .await?;
+
+    if let Some(mesh_handle) = mesh.take() {
+        if let Ok(mesh_owned) = Arc::try_unwrap(mesh_handle) {
+            let _ = mesh_owned.shutdown().await;
+        }
+    }
 
     Ok(())
 }

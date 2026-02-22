@@ -15,6 +15,7 @@ use tonic::{
 };
 
 pub mod proto {
+    #![allow(clippy::large_enum_variant)]
     tonic::include_proto!("valhall.hem.v1");
 }
 
@@ -294,7 +295,7 @@ async fn auth_grants_and_approval_receipts_matrix() -> Result<(), Box<dyn std::e
                 project: String::new(),
             }),
             key: String::new(),
-            async_read: false,
+            async_read: true,
             wait_timeout_ms: 0,
             reason: String::new(),
             approval_receipt: String::new(),
@@ -320,7 +321,7 @@ async fn auth_grants_and_approval_receipts_matrix() -> Result<(), Box<dyn std::e
                 project: String::new(),
             }),
             key: String::new(),
-            async_read: false,
+            async_read: true,
             wait_timeout_ms: 0,
             reason: String::new(),
             approval_receipt: String::new(),
@@ -356,7 +357,7 @@ async fn auth_grants_and_approval_receipts_matrix() -> Result<(), Box<dyn std::e
                 project: String::new(),
             }),
             key: String::new(),
-            async_read: false,
+            async_read: true,
             wait_timeout_ms: 0,
             reason: "need token".to_string(),
             approval_receipt: String::new(),
@@ -429,7 +430,7 @@ async fn auth_grants_and_approval_receipts_matrix() -> Result<(), Box<dyn std::e
                 project: String::new(),
             }),
             key: String::new(),
-            async_read: false,
+            async_read: true,
             wait_timeout_ms: 0,
             reason: "need read again".to_string(),
             approval_receipt: String::new(),
