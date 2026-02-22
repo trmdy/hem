@@ -1,0 +1,26 @@
+[package]
+name = "hemd"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+clap.workspace = true
+hem-core = { path = "../hem-core" }
+prost.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+valhall-config = { path = "../valhall-config" }
+valhall-events = { path = "../valhall-events" }
+valhall-net = { path = "../valhall-net" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+protoc-bin-vendored = "3"
+tonic-build = "0.12"
