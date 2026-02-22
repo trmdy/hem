@@ -6,6 +6,7 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use chrono::Utc;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -25,6 +26,7 @@ const EXPORT_BUNDLE_VERSION: &str = "hem-export-v1";
 const MASTER_KEYSET_VERSION: &str = "hem-master-keyset-v1";
 const ROTATION_JOURNAL_VERSION: &str = "hem-rotation-journal-v1";
 const ROTATION_JOURNAL_FILE: &str = "master-key-rotation.json";
+const STORE_LOCK_FILE: &str = "store.lock";
 
 #[derive(Debug, Clone)]
 pub struct HemStore {
@@ -64,6 +66,19 @@ struct RotationJournal {
     new_key_id: String,
     started_at: chrono::DateTime<Utc>,
     updated_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug)]
+struct StoreWriteLockGuard {
+    file: Option<std::fs::File>,
+}
+
+impl Drop for StoreWriteLockGuard {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            let _ = file.unlock();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +207,7 @@ impl HemStore {
 
     pub fn set_secret(&self, input: SetSecretInput) -> Result<SecretInfo> {
         input.validate()?;
+        let _lock = self.acquire_write_lock()?;
         let path = self.secret_file_path(&input.scope, input.name.as_str());
 
         let existing = if path.exists() {
@@ -248,6 +264,7 @@ impl HemStore {
     ) -> Result<SecretWithValues> {
         scope.validate()?;
         validate_secret_name(name)?;
+        let _lock = self.acquire_write_lock()?;
         let path = self.secret_file_path(scope, name);
         if !path.exists() {
             return Err(HemError::SecretNotFound(format!(
@@ -302,6 +319,7 @@ impl HemStore {
     ) -> Result<SecretInfo> {
         scope.validate()?;
         validate_secret_name(name)?;
+        let _lock = self.acquire_write_lock()?;
         if let Some(value) = group.as_ref() {
             validate_group_name(value.as_str())?;
         }
@@ -325,6 +343,7 @@ impl HemStore {
     pub fn delete_secret(&self, scope: &SecretScope, name: &str) -> Result<bool> {
         scope.validate()?;
         validate_secret_name(name)?;
+        let _lock = self.acquire_write_lock()?;
         let path = self.secret_file_path(scope, name);
         if !path.exists() {
             return Ok(false);
@@ -344,6 +363,7 @@ impl HemStore {
         secret_scope.validate()?;
         validate_secret_name(secret_name)?;
         grantee_scope.validate()?;
+        let _lock = self.acquire_write_lock()?;
         let grantee_id = normalize_subject("grantee_id", grantee_id)?.to_string();
         let actor = normalize_actor(actor);
 
@@ -389,6 +409,7 @@ impl HemStore {
         secret_scope.validate()?;
         validate_secret_name(secret_name)?;
         grantee_scope.validate()?;
+        let _lock = self.acquire_write_lock()?;
         let grantee_id = normalize_subject("grantee_id", grantee_id)?;
 
         let path = self.grant_file_path(secret_scope, secret_name);
@@ -488,6 +509,7 @@ impl HemStore {
                 "encrypted_bundle must not be empty".to_string(),
             ));
         }
+        let _lock = self.acquire_write_lock()?;
         let parsed: ExportBundle = serde_json::from_slice(bundle)?;
         if parsed.version != EXPORT_BUNDLE_VERSION {
             return Err(HemError::InvalidArgument(format!(
@@ -520,6 +542,7 @@ impl HemStore {
     }
 
     pub fn rotate_master_key(&self) -> Result<(String, u32)> {
+        let _lock = self.acquire_write_lock()?;
         let mut keyset = self.master_keyset.clone();
         if let Some(journal) = self.load_rotation_journal()? {
             let rotated = self.finalize_rotation(&journal, &mut keyset)?;
@@ -688,6 +711,20 @@ impl HemStore {
     fn write_master_keyset(&self, keyset: &MasterKeySet) -> Result<()> {
         let path = master_key_path(self.data_dir.as_path());
         write_master_key_file(path.as_path(), keyset)
+    }
+
+    fn acquire_write_lock(&self) -> Result<StoreWriteLockGuard> {
+        let path = store_lock_path(self.data_dir.as_path());
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path.as_path())?;
+        file.lock_exclusive()?;
+        Ok(StoreWriteLockGuard { file: Some(file) })
     }
 
     fn list_scope_secrets(&self, scope: &SecretScope) -> Result<Vec<SecretInfo>> {
@@ -872,6 +909,10 @@ fn rotation_journal_path(data_dir: &Path) -> PathBuf {
     data_dir.join("rotation").join(ROTATION_JOURNAL_FILE)
 }
 
+fn store_lock_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("locks").join(STORE_LOCK_FILE)
+}
+
 fn ensure_layout(data_dir: &Path) -> Result<()> {
     fs::create_dir_all(data_dir.join("secrets").join("global"))?;
     fs::create_dir_all(data_dir.join("secrets").join("project"))?;
@@ -884,6 +925,7 @@ fn ensure_layout(data_dir: &Path) -> Result<()> {
     fs::create_dir_all(data_dir.join("service-tokens"))?;
     fs::create_dir_all(data_dir.join("audit"))?;
     fs::create_dir_all(data_dir.join("rotation"))?;
+    fs::create_dir_all(data_dir.join("locks"))?;
     Ok(())
 }
 
