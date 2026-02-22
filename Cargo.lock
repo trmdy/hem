@@ -1186,6 +1186,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1401,12 +1411,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "hem-client"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "protoc-bin-vendored",
+ "thiserror 2.0.18",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
 name = "hem-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
  "chrono",
+ "fs2",
  "hmac",
  "rand 0.8.5",
  "serde",
@@ -1429,6 +1451,7 @@ dependencies = [
  "prost",
  "protoc-bin-vendored",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tonic",
@@ -3635,6 +3658,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "hem-client",
  "petgraph 0.6.5",
  "reqwest",
  "serde",
@@ -4535,6 +4559,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "fastembed",
+ "hem-client",
  "redis",
  "reqwest",
  "serde",
