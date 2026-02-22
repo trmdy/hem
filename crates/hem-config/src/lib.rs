@@ -6,6 +6,14 @@ pub mod ids {
         reorder_ulid_for_entropy_prefix(ulid::Ulid::new().to_string().to_lowercase().as_str())
     }
 
+    pub fn generate_prefixed_entropy_id(prefix: &str) -> String {
+        let trimmed = prefix.trim();
+        if trimmed.is_empty() {
+            return generate_entropy_prefixed_ulid();
+        }
+        format!("{trimmed}_{}", generate_entropy_prefixed_ulid())
+    }
+
     pub fn reorder_ulid_for_entropy_prefix(canonical: &str) -> String {
         if canonical.len() != CANONICAL_ULID_LENGTH {
             return canonical.to_string();
@@ -69,6 +77,20 @@ mod tests {
         let value = ids::generate_entropy_prefixed_ulid();
         assert_eq!(value.len(), ids::CANONICAL_ULID_LENGTH);
         assert!(value
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()));
+    }
+
+    #[test]
+    fn generated_prefixed_entropy_id_has_expected_shape() {
+        let value = ids::generate_prefixed_entropy_id("wf");
+        assert!(value.starts_with("wf_"));
+        let suffix = value
+            .split_once('_')
+            .map(|(_, tail)| tail)
+            .expect("prefix separator");
+        assert_eq!(suffix.len(), ids::CANONICAL_ULID_LENGTH);
+        assert!(suffix
             .chars()
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()));
     }
