@@ -1,0 +1,438 @@
+syntax = "proto3";
+
+package valhall.hem.v1;
+
+service HemRuntime {
+  // Secrets
+  rpc SetSecret(SetSecretRequest) returns (SecretInfo);
+  rpc GetSecret(GetSecretRequest) returns (GetSecretResponse);
+  rpc GetSecretInfo(GetSecretInfoRequest) returns (SecretInfo);
+  rpc DeleteSecret(DeleteSecretRequest) returns (DeleteSecretResponse);
+  rpc ListSecrets(ListSecretsRequest) returns (ListSecretsResponse);
+  rpc GetSecrets(GetSecretsRequest) returns (GetSecretsResponse);
+
+  // Groups
+  rpc SetGroup(SetGroupRequest) returns (GroupInfo);
+  rpc AddToGroup(AddToGroupRequest) returns (GroupInfo);
+  rpc RemoveFromGroup(RemoveFromGroupRequest) returns (RemoveFromGroupResponse);
+  rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
+  rpc ListGroupSecrets(ListGroupSecretsRequest) returns (ListGroupSecretsResponse);
+
+  // Tokens
+  rpc IssueAgentToken(IssueAgentTokenRequest) returns (IssueTokenResponse);
+  rpc IssueServiceToken(IssueServiceTokenRequest) returns (IssueTokenResponse);
+  rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
+  rpc ListActiveTokens(ListActiveTokensRequest) returns (ListActiveTokensResponse);
+
+  // Grants
+  rpc GrantAccess(GrantAccessRequest) returns (GrantInfo);
+  rpc RevokeAccess(RevokeAccessRequest) returns (RevokeAccessResponse);
+  rpc ListGrants(ListGrantsRequest) returns (ListGrantsResponse);
+
+  // Approvals
+  rpc ListPendingApprovals(ListPendingApprovalsRequest) returns (ListPendingApprovalsResponse);
+  rpc ApproveAccess(ResolveApprovalRequest) returns (ResolveApprovalResponse);
+  rpc DenyAccess(ResolveApprovalRequest) returns (ResolveApprovalResponse);
+  rpc GetApprovalStatus(GetApprovalStatusRequest) returns (ApprovalStatusResponse);
+
+  // Audit
+  rpc GetAuditLog(GetAuditLogRequest) returns (GetAuditLogResponse);
+
+  // Admin
+  rpc InitHem(InitHemRequest) returns (InitHemResponse);
+  rpc RotateMasterKey(RotateMasterKeyRequest) returns (RotateMasterKeyResponse);
+  rpc ExportSecrets(ExportSecretsRequest) returns (ExportSecretsResponse);
+  rpc ImportSecrets(ImportSecretsRequest) returns (ImportSecretsResponse);
+
+  // Health
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+enum SecretScope {
+  SECRET_SCOPE_UNSPECIFIED = 0;
+  SECRET_SCOPE_GLOBAL = 1;
+  SECRET_SCOPE_PROJECT = 2;
+  SECRET_SCOPE_IDENTITY = 3;
+}
+
+enum TokenType {
+  TOKEN_TYPE_UNSPECIFIED = 0;
+  TOKEN_TYPE_OPERATOR = 1;
+  TOKEN_TYPE_SERVICE = 2;
+  TOKEN_TYPE_AGENT_RUN = 3;
+}
+
+enum ApprovalState {
+  APPROVAL_STATE_UNSPECIFIED = 0;
+  APPROVAL_STATE_PENDING = 1;
+  APPROVAL_STATE_APPROVED = 2;
+  APPROVAL_STATE_DENIED = 3;
+  APPROVAL_STATE_TIMED_OUT = 4;
+}
+
+message ScopeSelector {
+  SecretScope scope = 1;
+  string project = 2;
+  string identity_id = 3;
+}
+
+message SecretRef {
+  ScopeSelector scope = 1;
+  string name = 2;
+}
+
+message ScopeResolutionContext {
+  string identity_id = 1;
+  string project = 2;
+}
+
+message SecretValue {
+  string key = 1;
+  string value = 2;
+}
+
+message SecretInfo {
+  ScopeSelector scope = 1;
+  string name = 2;
+  string description = 3;
+  bool requires_approval = 4;
+  string group = 5;
+  string created_at = 6;
+  string updated_at = 7;
+  string created_by = 8;
+  string last_accessed_at = 9;
+  string last_accessed_by = 10;
+}
+
+message SecretWithValues {
+  SecretInfo info = 1;
+  map<string, string> values = 2;
+}
+
+message SetSecretRequest {
+  SecretRef secret = 1;
+  repeated SecretValue values = 2;
+  string description = 3;
+  bool requires_approval = 4;
+  string group = 5;
+  string actor = 6;
+  string approval_receipt = 7;
+  string reason = 8;
+}
+
+message GetSecretRequest {
+  oneof lookup {
+    SecretRef secret = 1;
+    string name = 2;
+  }
+  ScopeResolutionContext context = 3;
+  string key = 4;
+  bool async_read = 5;
+  uint64 wait_timeout_ms = 6;
+  string reason = 7;
+  string approval_receipt = 8;
+}
+
+message PendingApproval {
+  string request_id = 1;
+  ApprovalState state = 2;
+  string message = 3;
+}
+
+message GetSecretResponse {
+  oneof result {
+    SecretWithValues secret = 1;
+    PendingApproval pending = 2;
+  }
+}
+
+message GetSecretInfoRequest {
+  oneof lookup {
+    SecretRef secret = 1;
+    string name = 2;
+  }
+  ScopeResolutionContext context = 3;
+}
+
+message DeleteSecretRequest {
+  SecretRef secret = 1;
+  string actor = 2;
+  string approval_receipt = 3;
+  string reason = 4;
+}
+
+message DeleteSecretResponse {
+  bool deleted = 1;
+  string approval_request_id = 2;
+  ApprovalState approval_state = 3;
+}
+
+message ListSecretsRequest {
+  ScopeSelector scope = 1;
+  string group = 2;
+  string prefix = 3;
+  uint32 limit = 4;
+}
+
+message ListSecretsResponse {
+  repeated SecretInfo secrets = 1;
+}
+
+message SecretBatchRequestItem {
+  oneof lookup {
+    SecretRef secret = 1;
+    string name = 2;
+  }
+  ScopeResolutionContext context = 3;
+  string key = 4;
+  bool async_read = 5;
+  uint64 wait_timeout_ms = 6;
+  string reason = 7;
+}
+
+message GetSecretsRequest {
+  repeated SecretBatchRequestItem requests = 1;
+}
+
+message SecretBatchResult {
+  oneof result {
+    SecretWithValues secret = 1;
+    PendingApproval pending = 2;
+  }
+  string error = 3;
+}
+
+message GetSecretsResponse {
+  repeated SecretBatchResult results = 1;
+}
+
+message GroupInfo {
+  string name = 1;
+  string description = 2;
+  string created_at = 3;
+  string updated_at = 4;
+}
+
+message SetGroupRequest {
+  string name = 1;
+  string description = 2;
+}
+
+message AddToGroupRequest {
+  SecretRef secret = 1;
+  string group = 2;
+}
+
+message RemoveFromGroupRequest {
+  SecretRef secret = 1;
+}
+
+message RemoveFromGroupResponse {
+  bool updated = 1;
+}
+
+message ListGroupsRequest {}
+
+message ListGroupsResponse {
+  repeated GroupInfo groups = 1;
+}
+
+message ListGroupSecretsRequest {
+  string group = 1;
+}
+
+message ListGroupSecretsResponse {
+  repeated SecretInfo secrets = 1;
+}
+
+message TokenInfo {
+  string token_id = 1;
+  TokenType token_type = 2;
+  string issued_at = 3;
+  string expires_at = 4;
+  string issued_by = 5;
+  string service_name = 6;
+  string identity_id = 7;
+  string project = 8;
+  repeated SecretScope scopes = 9;
+}
+
+message IssueAgentTokenRequest {
+  string identity_id = 1;
+  string project = 2;
+  repeated SecretScope scopes = 3;
+  uint64 ttl_seconds = 4;
+  string issued_by_service = 5;
+}
+
+message IssueServiceTokenRequest {
+  string service_name = 1;
+  uint64 ttl_seconds = 2;
+  string issued_by = 3;
+}
+
+message IssueTokenResponse {
+  string token = 1;
+  TokenInfo info = 2;
+}
+
+message RevokeTokenRequest {
+  string token_id = 1;
+  string actor = 2;
+}
+
+message RevokeTokenResponse {
+  bool revoked = 1;
+}
+
+message ListActiveTokensRequest {
+  TokenType token_type = 1;
+  string service_name = 2;
+  string identity_id = 3;
+  uint32 limit = 4;
+}
+
+message ListActiveTokensResponse {
+  repeated TokenInfo tokens = 1;
+}
+
+message GrantInfo {
+  SecretRef secret = 1;
+  ScopeSelector grantee_scope = 2;
+  string grantee_id = 3;
+  string created_at = 4;
+  string created_by = 5;
+}
+
+message GrantAccessRequest {
+  SecretRef secret = 1;
+  ScopeSelector grantee_scope = 2;
+  string grantee_id = 3;
+  string actor = 4;
+}
+
+message RevokeAccessRequest {
+  SecretRef secret = 1;
+  ScopeSelector grantee_scope = 2;
+  string grantee_id = 3;
+  string actor = 4;
+}
+
+message RevokeAccessResponse {
+  bool revoked = 1;
+}
+
+message ListGrantsRequest {
+  SecretRef secret = 1;
+}
+
+message ListGrantsResponse {
+  repeated GrantInfo grants = 1;
+}
+
+message ApprovalRequestInfo {
+  string request_id = 1;
+  ApprovalState state = 2;
+  SecretRef secret = 3;
+  string requester_token_id = 4;
+  string requester_identity_id = 5;
+  string requester_project = 6;
+  string reason = 7;
+  string created_at = 8;
+  string resolved_at = 9;
+  string resolved_by = 10;
+  string resolve_message = 11;
+  string action = 12;
+}
+
+message ListPendingApprovalsRequest {
+  uint32 limit = 1;
+}
+
+message ListPendingApprovalsResponse {
+  repeated ApprovalRequestInfo requests = 1;
+}
+
+message ResolveApprovalRequest {
+  string request_id = 1;
+  string actor = 2;
+  string message = 3;
+}
+
+message ResolveApprovalResponse {
+  ApprovalRequestInfo request = 1;
+  string approval_receipt = 2;
+}
+
+message GetApprovalStatusRequest {
+  string request_id = 1;
+}
+
+message ApprovalStatusResponse {
+  ApprovalRequestInfo request = 1;
+}
+
+message AuditEntry {
+  string audit_id = 1;
+  string ts = 2;
+  string action = 3;
+  string actor = 4;
+  string token_id = 5;
+  SecretRef secret = 6;
+  string result = 7;
+  string details = 8;
+}
+
+message GetAuditLogRequest {
+  ScopeSelector scope = 1;
+  string since = 2;
+  string until = 3;
+  uint32 limit = 4;
+}
+
+message GetAuditLogResponse {
+  repeated AuditEntry entries = 1;
+}
+
+message InitHemRequest {
+  bool force = 1;
+}
+
+message InitHemResponse {
+  bool initialized = 1;
+  string operator_token = 2;
+}
+
+message RotateMasterKeyRequest {
+  string actor = 1;
+}
+
+message RotateMasterKeyResponse {
+  string new_key_id = 1;
+  uint32 rotated_secret_count = 2;
+}
+
+message ExportSecretsRequest {
+  ScopeSelector scope = 1;
+}
+
+message ExportSecretsResponse {
+  bytes encrypted_bundle = 1;
+}
+
+message ImportSecretsRequest {
+  bytes encrypted_bundle = 1;
+  bool merge = 2;
+  string actor = 3;
+}
+
+message ImportSecretsResponse {
+  uint32 imported_secret_count = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+  string version = 2;
+}
