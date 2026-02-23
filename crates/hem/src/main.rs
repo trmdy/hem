@@ -306,6 +306,8 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = ExamplesFormat::Json)]
         format: ExamplesFormat,
     },
+    #[command(alias = "u")]
+    Usage,
 }
 
 #[derive(Debug, Subcommand)]
@@ -382,6 +384,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     if let Commands::Examples { format } = &cli.command {
         print_examples(*format)?;
+        return Ok(());
+    }
+    if let Commands::Usage = &cli.command {
+        print_usage();
         return Ok(());
     }
 
@@ -1017,8 +1023,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("new_key_id={}", response.new_key_id);
             println!("rotated_secret_count={}", response.rotated_secret_count);
         }
-        Commands::Examples { .. } => {
-            unreachable!("examples command is handled before daemon connect")
+        Commands::Examples { .. } | Commands::Usage => {
+            unreachable!("usage/examples command is handled before daemon connect")
         }
     }
 
@@ -1766,6 +1772,15 @@ fn print_examples(format: ExamplesFormat) -> Result<(), Box<dyn std::error::Erro
     let body = render_examples(format)?;
     println!("{body}");
     Ok(())
+}
+
+fn print_usage() {
+    println!("Hem usage");
+    println!("  hem set openai-prod api_key=...");
+    println!("  hem get openai-prod api_key");
+    println!("  hem search 'project/*/openai-*'");
+    println!("  hem approvals");
+    println!("  hem usage");
 }
 
 fn render_examples(format: ExamplesFormat) -> Result<String, Box<dyn std::error::Error>> {

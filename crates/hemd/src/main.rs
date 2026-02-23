@@ -11,7 +11,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use hem_core::{
     authorize_admin, authorize_read,
     model::{resolution_chain, ApprovalState as CoreApprovalState},
@@ -71,6 +71,14 @@ struct Cli {
     data_dir: Option<String>,
     #[arg(long)]
     once: bool,
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum CliCommand {
+    #[command(alias = "u")]
+    Usage,
 }
 
 #[derive(Clone)]
@@ -2243,6 +2251,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
+    if matches!(cli.command, Some(CliCommand::Usage)) {
+        print_usage();
+        return Ok(());
+    }
     let data_dir = resolve_data_dir(cli.data_dir);
     let initialized = match HemStore::open(data_dir.as_path()) {
         Ok(_) => true,
@@ -2301,4 +2313,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn print_usage() {
+    println!("Hemd usage");
+    println!("  hemd --bind 127.0.0.1:50091");
+    println!("  hemd --data-dir ~/.valhall/hem");
+    println!("  hemd --once");
+    println!("  hemd usage");
 }
