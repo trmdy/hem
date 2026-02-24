@@ -11,6 +11,8 @@ members = [
   "crates/skip",
   "crates/skip-core",
   "crates/skipd",
+  "crates/slik",
+  "crates/slikd",
   "crates/smi",
   "crates/smi-core",
   "crates/smid",

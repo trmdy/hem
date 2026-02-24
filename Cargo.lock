@@ -3713,6 +3713,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
+name = "slik"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "fjell-core",
+ "prost",
+ "protoc-bin-vendored",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tonic",
+ "tonic-build",
+ "ulid",
+]
+
+[[package]]
+name = "slikd"
+version = "0.1.0"
+dependencies = [
+ "async-nats",
+ "chrono",
+ "clap",
+ "prost",
+ "protoc-bin-vendored",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+ "valhall-events",
+ "valhall-net",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

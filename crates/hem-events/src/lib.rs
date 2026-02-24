@@ -31,6 +31,12 @@ pub mod topics {
     pub const HEM_TOKEN_REVOKED: &str = "hem.token.revoked";
     pub const HEM_APPROVAL_REQUESTED: &str = "hem.approval.requested";
     pub const HEM_APPROVAL_RESOLVED: &str = "hem.approval.resolved";
+
+    pub const SLIK_TASK_CREATED: &str = "slik.task.created";
+    pub const SLIK_TASK_CLAIMED: &str = "slik.task.claimed";
+    pub const SLIK_TASK_RELEASED: &str = "slik.task.released";
+    pub const SLIK_TASK_UPDATED: &str = "slik.task.updated";
+    pub const SLIK_TASK_COMPLETED: &str = "slik.task.completed";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,5 +86,14 @@ mod tests {
         );
         assert_eq!(topics::HEM_SECRET_WRITTEN, "hem.secret.written");
         assert_eq!(topics::HEM_APPROVAL_REQUESTED, "hem.approval.requested");
+    }
+
+    #[test]
+    fn sprint_two_slik_topics_are_stable() {
+        assert_eq!(topics::SLIK_TASK_CREATED, "slik.task.created");
+        assert_eq!(topics::SLIK_TASK_CLAIMED, "slik.task.claimed");
+        assert_eq!(topics::SLIK_TASK_RELEASED, "slik.task.released");
+        assert_eq!(topics::SLIK_TASK_UPDATED, "slik.task.updated");
+        assert_eq!(topics::SLIK_TASK_COMPLETED, "slik.task.completed");
     }
 }
