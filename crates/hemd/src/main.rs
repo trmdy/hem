@@ -77,7 +77,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
-    #[command(alias = "u")]
+    #[command(visible_alias = "u")]
     Usage,
 }
 
@@ -2317,8 +2317,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn print_usage() {
     println!("Hemd usage");
+    println!("  Shorthand: u usage");
     println!("  hemd --bind 127.0.0.1:50091");
     println!("  hemd --data-dir ~/.valhall/hem");
     println!("  hemd --once");
-    println!("  hemd usage");
+    println!("  hemd u");
 }

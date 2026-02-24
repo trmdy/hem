@@ -66,7 +66,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(visible_alias = "h")]
     Health,
+    #[command(visible_alias = "i")]
     Init {
         #[arg(long)]
         force: bool,
@@ -75,6 +77,7 @@ enum Commands {
         about = "Create or update a secret",
         after_help = "Examples:\n  hem set openai-prod api_key=... model=gpt-4.1\n  hem set project/acme/cloudflare token=...\n  hem set identity/agent-123/github token=... --requires-approval\n  hem set openai-prod --interactive\n  hem set openai-prod api_key=op://Personal/openai-prod/api_key\n  hem set openai-prod --from-op-item op://Personal/openai-prod\n\nIf set returns approval_required, approve then retry:\n  hem approvals\n  hem approve <request-id>\n  hem set openai-prod api_key=... --approval-receipt <receipt>\n\nNotes:\n  - Secret names must be lowercase, digits, and hyphen only.\n  - Secret values are key=value pairs.\n  - Values prefixed with op:// are resolved via `op read`.\n  - --from-op-item imports all non-empty fields from a 1Password item."
     )]
+    #[command(visible_alias = "s")]
     Set {
         #[arg(
             value_name = "SECRET",
@@ -117,6 +120,7 @@ enum Commands {
         about = "Read a secret by name or full reference",
         after_help = "Examples:\n  hem get openai-prod\n  hem get project/acme/openai-prod api_key\n  hem get openai-prod api_key --project acme\n\nIf get returns pending_request_id:\n  hem approvals\n  hem approve <request-id>\n  hem get openai-prod --approval-receipt <receipt>\n\nIf SECRET is unscoped (<name>), resolution is identity -> project -> global."
     )]
+    #[command(visible_alias = "g")]
     Get {
         #[arg(
             value_name = "SECRET",
@@ -136,8 +140,7 @@ enum Commands {
     },
     #[command(
         about = "Search secrets by name/scope/group/description",
-        alias = "list",
-        alias = "ls",
+        visible_aliases = ["list", "ls", "l"],
         after_help = "Wildcard search:\n  '*' matches any chars\n  '?' matches one char\n\nExamples:\n  hem ls                             # same as hem ls '*'\n  hem search openai\n  hem search 'project/*/openai-*'\n  hem search 'identity/*/github'\n\nTip: quote wildcard patterns so the shell does not expand them."
     )]
     Search {
@@ -154,6 +157,7 @@ enum Commands {
         about = "Archive a secret to local JSON",
         after_help = "Default output path:\n  $VALHALL_HEM_ARCHIVE_DIR or ~/.valhall/hem/archive\n\nExample:\n  hem archive global/openai-prod\n  hem archive project/acme/openai-prod -o /tmp/openai.json"
     )]
+    #[command(visible_alias = "ar")]
     Archive {
         #[arg(
             value_name = "SECRET",
@@ -168,6 +172,7 @@ enum Commands {
         about = "Delete a secret (approval workflow enforced server-side)",
         after_help = "Flow:\n  1) hem delete <secret>\n  2) hem approvals\n  3) hem approve <request-id>           # interactive typed confirmation\n  4) hem delete <secret> --approval-receipt <receipt>"
     )]
+    #[command(visible_aliases = ["del", "rm"])]
     Delete {
         #[arg(
             value_name = "SECRET",
@@ -182,14 +187,14 @@ enum Commands {
         #[arg(long, default_value = "")]
         reason: String,
     },
-    #[command(about = "List pending approval requests")]
+    #[command(about = "List pending approval requests", visible_aliases = ["ap", "pending"])]
     Approvals {
         #[arg(long, default_value_t = 200)]
         limit: u32,
     },
     #[command(
         about = "Approve a pending request (interactive human confirmation)",
-        alias = "approve-delete",
+        visible_aliases = ["approve-delete", "ok"],
         after_help = "This command must run in an interactive terminal. You must type:\n  APPROVE <request-id>"
     )]
     Approve {
@@ -201,7 +206,7 @@ enum Commands {
     },
     #[command(
         about = "Deny a pending request (interactive human confirmation)",
-        alias = "deny-delete",
+        visible_aliases = ["deny-delete", "no"],
         after_help = "This command must run in an interactive terminal. You must type:\n  DENY <request-id>"
     )]
     Deny {
@@ -211,7 +216,7 @@ enum Commands {
         #[arg(long, default_value = "")]
         message: String,
     },
-    #[command(about = "Issue/list/revoke Hem access tokens")]
+    #[command(about = "Issue/list/revoke Hem access tokens", visible_alias = "t")]
     Token {
         #[command(subcommand)]
         command: TokenCommands,
@@ -220,6 +225,7 @@ enum Commands {
         about = "Grant explicit cross-scope access to a secret",
         after_help = "Examples:\n  hem grant-access project/acme/cloudflare-prod --grantee-scope global --grantee-id smi\n  hem grant-access identity/agent-123/github --grantee-scope identity/agent-123 --grantee-id agent-123"
     )]
+    #[command(visible_aliases = ["ga", "grant"])]
     GrantAccess {
         secret: String,
         #[arg(
@@ -237,6 +243,7 @@ enum Commands {
         about = "Revoke explicit grant for a secret",
         after_help = "Example:\n  hem revoke-access project/acme/cloudflare-prod --grantee-scope global --grantee-id smi"
     )]
+    #[command(visible_aliases = ["ra", "revoke"])]
     RevokeAccess {
         secret: String,
         #[arg(
@@ -250,14 +257,13 @@ enum Commands {
         #[arg(long, default_value = "hem-cli")]
         actor: String,
     },
-    #[command(about = "List explicit grants for a secret")]
-    ListGrants {
-        secret: String,
-    },
+    #[command(about = "List explicit grants for a secret", visible_aliases = ["grants", "lg"])]
+    ListGrants { secret: String },
     #[command(
         about = "Read Hem audit log",
         after_help = "Examples:\n  hem audit\n  hem audit --scope project/acme --since 2026-02-21T00:00:00Z --limit 100"
     )]
+    #[command(visible_aliases = ["au", "log"])]
     Audit {
         #[arg(long, value_name = "SCOPE")]
         scope: Option<String>,
@@ -272,6 +278,7 @@ enum Commands {
         about = "Export secrets to encrypted bundle bytes",
         after_help = "Examples:\n  hem export\n  hem export --scope project/acme -o /tmp/hem-export.bin"
     )]
+    #[command(visible_aliases = ["ex", "dump"])]
     Export {
         #[arg(long, value_name = "SCOPE")]
         scope: Option<String>,
@@ -282,6 +289,7 @@ enum Commands {
         about = "Import secrets from encrypted bundle bytes",
         after_help = "Examples:\n  hem import -i /tmp/hem-export.bin\n  hem import -i /tmp/hem-export.bin --merge"
     )]
+    #[command(visible_aliases = ["im", "load"])]
     Import {
         #[arg(short = 'i', long, value_name = "PATH")]
         input: String,
@@ -294,6 +302,7 @@ enum Commands {
         about = "Rotate Hem master key and re-encrypt secrets",
         after_help = "Example:\n  hem rotate --actor operator"
     )]
+    #[command(visible_aliases = ["ro", "rk"])]
     Rotate {
         #[arg(long, default_value = "hem-cli")]
         actor: String,
@@ -302,17 +311,18 @@ enum Commands {
         about = "Print canonical Hem command examples for agents",
         after_help = "Machine-readable by default.\n\nExamples:\n  hem examples\n  hem examples --format json | jq .\n  hem examples --format shell"
     )]
+    #[command(visible_aliases = ["eg", "x"])]
     Examples {
         #[arg(long, value_enum, default_value_t = ExamplesFormat::Json)]
         format: ExamplesFormat,
     },
-    #[command(alias = "u")]
+    #[command(visible_alias = "u")]
     Usage,
 }
 
 #[derive(Debug, Subcommand)]
 enum TokenCommands {
-    #[command(about = "Issue a service token")]
+    #[command(about = "Issue a service token", visible_aliases = ["is", "service"])]
     IssueService {
         service_name: String,
         #[arg(long)]
@@ -320,7 +330,7 @@ enum TokenCommands {
         #[arg(long, default_value = "hem-cli")]
         issued_by: String,
     },
-    #[command(about = "Issue an agent token")]
+    #[command(about = "Issue an agent token", visible_aliases = ["ia", "agent"])]
     IssueAgent {
         #[arg(long)]
         identity_id: Option<String>,
@@ -333,7 +343,7 @@ enum TokenCommands {
         #[arg(long, default_value = "hem-cli")]
         issued_by_service: String,
     },
-    #[command(about = "List active tokens")]
+    #[command(about = "List active tokens", visible_aliases = ["ls", "l"])]
     List {
         #[arg(long, value_enum)]
         token_type: Option<TokenTypeArg>,
@@ -344,7 +354,7 @@ enum TokenCommands {
         #[arg(long, default_value_t = 200)]
         limit: u32,
     },
-    #[command(about = "Revoke a token by token_id")]
+    #[command(about = "Revoke a token by token_id", visible_aliases = ["rv", "rm"])]
     Revoke {
         token_id: String,
         #[arg(long, default_value = "hem-cli")]
@@ -398,17 +408,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Health => {
             let response = client.health(HealthRequest {}).await?.into_inner();
-            println!("status={}", response.status);
-            println!("version={}", response.version);
+            print_kv("status", response.status);
+            print_kv("version", response.version);
         }
         Commands::Init { force } => {
             let response = client
                 .init_hem(InitHemRequest { force })
                 .await?
                 .into_inner();
-            println!("initialized={}", response.initialized);
+            print_kv("initialized", response.initialized);
             if !response.operator_token.is_empty() {
-                println!("operator_token={}", response.operator_token);
+                print_kv("operator_token", response.operator_token);
             }
         }
         Commands::Set {
@@ -453,16 +463,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .await?
                 .into_inner();
-            println!("name={}", response.name);
-            println!(
-                "scope={}",
+            print_kv("name", response.name);
+            print_kv(
+                "scope",
                 format_scope(response.scope.as_ref().unwrap_or(&ScopeSelector {
                     scope: SecretScope::Global as i32,
                     project: String::new(),
                     identity_id: String::new(),
-                }))
+                })),
             );
-            println!("updated_at={}", response.updated_at);
+            print_kv("updated_at", response.updated_at);
         }
         Commands::Get {
             secret,
@@ -492,17 +502,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             match response.result {
                 Some(get_secret_response::Result::Secret(secret)) => {
                     let info = secret.info.ok_or("missing secret info in get response")?;
-                    println!("name={}", info.name);
+                    print_kv("name", info.name);
                     if let Some(scope) = info.scope.as_ref() {
-                        println!("scope={}", format_scope(scope));
+                        print_kv("scope", format_scope(scope));
                     }
+                    print_table_header(&["KEY", "VALUE"]);
                     for (entry_key, entry_value) in secret.values {
                         println!("{entry_key}={entry_value}");
                     }
                 }
                 Some(get_secret_response::Result::Pending(pending)) => {
-                    println!("pending_request_id={}", pending.request_id);
-                    println!("message={}", pending.message);
+                    print_kv("pending_request_id", pending.request_id);
+                    print_kv("message", pending.message);
                 }
                 None => return Err("missing get response result".into()),
             }
@@ -561,7 +572,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if matched == 0 {
                 println!("no matches");
             } else {
-                println!("matches={matched}");
+                print_kv("matches", matched);
             }
         }
         Commands::Archive { secret, output } => {
@@ -628,7 +639,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 None => default_archive_path(scope_string.as_str(), secret_name.as_str()),
             };
             write_secure_json(output.as_path(), &archive)?;
-            println!("archived={}", output.display());
+            print_kv("archived", output.display());
         }
         Commands::Delete {
             secret,
@@ -647,21 +658,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .await?
                 .into_inner();
             if response.deleted {
-                println!("deleted=true");
+                print_kv("deleted", true);
                 if !response.approval_request_id.trim().is_empty() {
-                    println!("approval_request_id={}", response.approval_request_id);
+                    print_kv("approval_request_id", response.approval_request_id);
                 }
             } else if !response.approval_request_id.trim().is_empty() {
-                println!("deleted=false");
-                println!("approval_required=true");
-                println!("request_id={}", response.approval_request_id);
-                println!("next=hem approve {}", response.approval_request_id);
-                println!(
-                    "then=hem delete {} --approval-receipt <receipt>",
-                    secret.trim()
+                print_kv("deleted", false);
+                print_kv("approval_required", true);
+                print_kv("request_id", response.approval_request_id.as_str());
+                print_kv(
+                    "next",
+                    format!("hem approve {}", response.approval_request_id),
+                );
+                print_kv(
+                    "then",
+                    format!("hem delete {} --approval-receipt <receipt>", secret.trim()),
                 );
             } else {
-                println!("deleted=false");
+                print_kv("deleted", false);
             }
         }
         Commands::Approvals { limit } => {
@@ -701,7 +715,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         println!("{} action={} (missing secret ref)", item.request_id, action);
                     }
                 }
-                println!("pending_count={pending_count}");
+                print_kv("pending_count", pending_count);
             }
         }
         Commands::Approve {
@@ -719,14 +733,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .await?
                 .into_inner();
             if let Some(request) = response.request {
-                println!("request_id={}", request.request_id);
-                println!("state={}", approval_state_label(request.state));
-                println!("action={}", request.action);
+                print_kv("request_id", request.request_id);
+                print_kv("state", approval_state_label(request.state));
+                print_kv("action", request.action);
             }
             if response.approval_receipt.trim().is_empty() {
-                println!("approval_receipt=");
+                print_kv("approval_receipt", "");
             } else {
-                println!("approval_receipt={}", response.approval_receipt);
+                print_kv("approval_receipt", response.approval_receipt);
             }
         }
         Commands::Deny {
@@ -744,9 +758,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .await?
                 .into_inner();
             if let Some(request) = response.request {
-                println!("request_id={}", request.request_id);
-                println!("state={}", approval_state_label(request.state));
-                println!("action={}", request.action);
+                print_kv("request_id", request.request_id);
+                print_kv("state", approval_state_label(request.state));
+                print_kv("action", request.action);
             }
         }
         Commands::Token { command } => match command {
@@ -763,7 +777,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     })
                     .await?
                     .into_inner();
-                println!("token={}", response.token);
+                print_kv("token", response.token);
                 if let Some(info) = response.info {
                     print_token_info(&info);
                 }
@@ -788,7 +802,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     })
                     .await?
                     .into_inner();
-                println!("token={}", response.token);
+                print_kv("token", response.token);
                 if let Some(info) = response.info {
                     print_token_info(&info);
                 }
@@ -827,7 +841,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             token.expires_at
                         );
                     }
-                    println!("active_count={count}");
+                    print_kv("active_count", count);
                 }
             }
             TokenCommands::Revoke { token_id, actor } => {
@@ -835,7 +849,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .revoke_token(RevokeTokenRequest { token_id, actor })
                     .await?
                     .into_inner();
-                println!("revoked={}", response.revoked);
+                print_kv("revoked", response.revoked);
             }
         },
         Commands::GrantAccess {
@@ -866,10 +880,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .as_ref()
                 .map(format_scope)
                 .unwrap_or_else(|| "unspecified".to_string());
-            println!("secret={}/{}", scope, secret.name);
-            println!("grantee_scope={}", grantee_scope);
-            println!("grantee_id={}", response.grantee_id);
-            println!("created_at={}", response.created_at);
+            print_kv("secret", format!("{scope}/{}", secret.name));
+            print_kv("grantee_scope", grantee_scope);
+            print_kv("grantee_id", response.grantee_id);
+            print_kv("created_at", response.created_at);
         }
         Commands::RevokeAccess {
             secret,
@@ -888,7 +902,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .await?
                 .into_inner();
-            println!("revoked={}", response.revoked);
+            print_kv("revoked", response.revoked);
         }
         Commands::ListGrants { secret } => {
             let secret_ref = parse_secret_ref_or_global(secret.as_str())?;
@@ -927,7 +941,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         blank_dash(grant.created_by.as_str())
                     );
                 }
-                println!("count={count}");
+                print_kv("count", count);
             }
         }
         Commands::Audit {
@@ -975,7 +989,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         blank_dash(entry.details.as_str())
                     );
                 }
-                println!("count={count}");
+                print_kv("count", count);
             }
         }
         Commands::Export { scope, output } => {
@@ -994,8 +1008,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 None => default_export_path(),
             };
             write_secure_bytes(output.as_path(), response.encrypted_bundle.as_slice())?;
-            println!("exported={}", output.display());
-            println!("bytes={}", response.encrypted_bundle.len());
+            print_kv("exported", output.display());
+            print_kv("bytes", response.encrypted_bundle.len());
         }
         Commands::Import {
             input,
@@ -1012,16 +1026,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .await?
                 .into_inner();
-            println!("imported_secret_count={}", response.imported_secret_count);
-            println!("merge={merge}");
+            print_kv("imported_secret_count", response.imported_secret_count);
+            print_kv("merge", merge);
         }
         Commands::Rotate { actor } => {
             let response = client
                 .rotate_master_key(RotateMasterKeyRequest { actor })
                 .await?
                 .into_inner();
-            println!("new_key_id={}", response.new_key_id);
-            println!("rotated_secret_count={}", response.rotated_secret_count);
+            print_kv("new_key_id", response.new_key_id);
+            print_kv("rotated_secret_count", response.rotated_secret_count);
         }
         Commands::Examples { .. } | Commands::Usage => {
             unreachable!("usage/examples command is handled before daemon connect")
@@ -1610,19 +1624,19 @@ fn blank_dash(value: &str) -> &str {
 fn print_token_info(info: &proto::TokenInfo) {
     let token_type =
         proto::TokenType::try_from(info.token_type).unwrap_or(proto::TokenType::Unspecified);
-    println!("token_id={}", info.token_id);
-    println!("token_type={}", format_token_type(token_type));
-    println!("issued_at={}", info.issued_at);
-    println!("expires_at={}", info.expires_at);
-    println!("issued_by={}", info.issued_by);
+    print_kv("token_id", &info.token_id);
+    print_kv("token_type", format_token_type(token_type));
+    print_kv("issued_at", &info.issued_at);
+    print_kv("expires_at", &info.expires_at);
+    print_kv("issued_by", &info.issued_by);
     if !info.service_name.trim().is_empty() {
-        println!("service_name={}", info.service_name);
+        print_kv("service_name", &info.service_name);
     }
     if !info.identity_id.trim().is_empty() {
-        println!("identity_id={}", info.identity_id);
+        print_kv("identity_id", &info.identity_id);
     }
     if !info.project.trim().is_empty() {
-        println!("project={}", info.project);
+        print_kv("project", &info.project);
     }
     if !info.scopes.is_empty() {
         let scopes = info
@@ -1639,7 +1653,7 @@ fn print_token_info(info: &proto::TokenInfo) {
             })
             .collect::<Vec<&str>>()
             .join(",");
-        println!("scopes={scopes}");
+        print_kv("scopes", scopes);
     }
 }
 
@@ -1776,11 +1790,28 @@ fn print_examples(format: ExamplesFormat) -> Result<(), Box<dyn std::error::Erro
 
 fn print_usage() {
     println!("Hem usage");
-    println!("  hem set openai-prod api_key=...");
-    println!("  hem get openai-prod api_key");
-    println!("  hem search 'project/*/openai-*'");
-    println!("  hem approvals");
-    println!("  hem usage");
+    println!("  Shorthands: h health, i init, s set, g get, l/ls search, ar archive, del/rm delete, ap approvals, ok approve, no deny, t token, ga grant-access, ra revoke-access, lg list-grants, au audit, ex export, im import, ro rotate, eg examples, u usage");
+    println!();
+    println!("  hem s openai-prod api_key=...");
+    println!("  hem g openai-prod api_key");
+    println!("  hem l 'project/*/openai-*'");
+    println!("  hem ap");
+    println!("  hem u");
+}
+
+fn print_kv(key: &str, value: impl std::fmt::Display) {
+    println!(
+        "{:<24} {}",
+        colorize(color_output_enabled(), key, "1;34"),
+        value
+    );
+}
+
+fn print_table_header(columns: &[&str]) {
+    println!(
+        "{}",
+        colorize(color_output_enabled(), columns.join("\t").as_str(), "1;36")
+    );
 }
 
 fn render_examples(format: ExamplesFormat) -> Result<String, Box<dyn std::error::Error>> {
