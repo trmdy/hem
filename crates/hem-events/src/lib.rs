@@ -37,6 +37,15 @@ pub mod topics {
     pub const SLIK_TASK_RELEASED: &str = "slik.task.released";
     pub const SLIK_TASK_UPDATED: &str = "slik.task.updated";
     pub const SLIK_TASK_COMPLETED: &str = "slik.task.completed";
+
+    pub const MYSE_SESSION_CREATED: &str = "myse.session.created";
+    pub const MYSE_SESSION_READY: &str = "myse.session.ready";
+    pub const MYSE_SESSION_PASSED: &str = "myse.session.passed";
+    pub const MYSE_SESSION_FAILED: &str = "myse.session.failed";
+    pub const MYSE_SESSION_ERRORED: &str = "myse.session.errored";
+    pub const MYSE_SESSION_STOPPED: &str = "myse.session.stopped";
+    pub const MYSE_SESSION_EXPIRED: &str = "myse.session.expired";
+    pub const MYSE_SESSION_DESTROYED: &str = "myse.session.destroyed";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,5 +104,17 @@ mod tests {
         assert_eq!(topics::SLIK_TASK_RELEASED, "slik.task.released");
         assert_eq!(topics::SLIK_TASK_UPDATED, "slik.task.updated");
         assert_eq!(topics::SLIK_TASK_COMPLETED, "slik.task.completed");
+    }
+
+    #[test]
+    fn myse_topics_are_stable() {
+        assert_eq!(topics::MYSE_SESSION_CREATED, "myse.session.created");
+        assert_eq!(topics::MYSE_SESSION_READY, "myse.session.ready");
+        assert_eq!(topics::MYSE_SESSION_PASSED, "myse.session.passed");
+        assert_eq!(topics::MYSE_SESSION_FAILED, "myse.session.failed");
+        assert_eq!(topics::MYSE_SESSION_ERRORED, "myse.session.errored");
+        assert_eq!(topics::MYSE_SESSION_STOPPED, "myse.session.stopped");
+        assert_eq!(topics::MYSE_SESSION_EXPIRED, "myse.session.expired");
+        assert_eq!(topics::MYSE_SESSION_DESTROYED, "myse.session.destroyed");
     }
 }
