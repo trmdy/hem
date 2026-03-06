@@ -22,6 +22,8 @@ members = [
   "crates/hem-core",
   "crates/hem-client",
   "crates/hemd",
+  "crates/hjul",
+  "crates/hjuld",
   "crates/vis",
   "crates/vis-core",
   "crates/visd",

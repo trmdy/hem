@@ -40,11 +40,11 @@ mod nats;
 mod rpc;
 mod subscription;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use valhall_events::SystemEvent;
 
 pub use config::MeshConfig;
@@ -65,7 +65,11 @@ pub fn delivery_for(event: &SystemEvent) -> DeliveryKind {
         SystemEvent::AgentRunRequested | SystemEvent::ContainerSpawnRequested => {
             DeliveryKind::RequestResponse
         }
-        SystemEvent::MemorySyncRequested | SystemEvent::FileRootMounted => DeliveryKind::Publish,
+        SystemEvent::MemorySyncRequested
+        | SystemEvent::FileRootMounted
+        | SystemEvent::MessageSent
+        | SystemEvent::DirectMessageSent
+        | SystemEvent::ChannelCreated => DeliveryKind::Publish,
     }
 }
 
@@ -152,16 +156,12 @@ impl Mesh {
             ));
         }
 
-        let mut subscriber = self
-            .nats
-            .subscribe(subject.to_string())
-            .await
-            .map_err(MeshError::nats)?;
         let (stop_tx, mut stop_rx) = oneshot::channel();
 
         let service_name = self.service_name.clone();
         let subject_owned = subject.to_string();
         let handler = Arc::new(handler);
+        let nats = self.nats.clone();
 
         let join_handle = tokio::spawn(async move {
             debug!(
@@ -171,38 +171,66 @@ impl Mesh {
             );
 
             loop {
-                tokio::select! {
-                    _ = &mut stop_rx => {
-                        debug!(
+                let mut subscriber = match nats.subscribe(subject_owned.clone()).await {
+                    Ok(subscriber) => subscriber,
+                    Err(error) => {
+                        warn!(
                             service = %service_name,
                             subject = %subject_owned,
-                            "mesh subscription stop requested"
+                            error = %error,
+                            "mesh subscription start failed; retrying"
                         );
-                        break;
-                    }
-                    maybe_message = subscriber.next() => {
-                        match maybe_message {
-                            Some(message) => {
-                                let event = Event::from_nats_message(message);
+                        tokio::select! {
+                            _ = &mut stop_rx => {
                                 debug!(
                                     service = %service_name,
-                                    subject = %event.subject,
-                                    payload_bytes = event.payload.len(),
-                                    "mesh event received"
+                                    subject = %subject_owned,
+                                    "mesh subscription stop requested"
                                 );
-                                handler(event);
+                                break;
                             }
-                            None => break,
+                            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                                continue;
+                            }
+                        }
+                    }
+                };
+
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => {
+                            debug!(
+                                service = %service_name,
+                                subject = %subject_owned,
+                                "mesh subscription stop requested"
+                            );
+                            return;
+                        }
+                        maybe_message = subscriber.next() => {
+                            match maybe_message {
+                                Some(message) => {
+                                    let event = Event::from_nats_message(message);
+                                    debug!(
+                                        service = %service_name,
+                                        subject = %event.subject,
+                                        payload_bytes = event.payload.len(),
+                                        "mesh event received"
+                                    );
+                                    handler(event);
+                                }
+                                None => {
+                                    warn!(
+                                        service = %service_name,
+                                        subject = %subject_owned,
+                                        "mesh subscription stream ended; re-subscribing"
+                                    );
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
             }
-
-            debug!(
-                service = %service_name,
-                subject = %subject_owned,
-                "mesh subscription stopped"
-            );
         });
 
         Ok(Subscription::new(stop_tx, join_handle))
@@ -261,6 +289,18 @@ mod tests {
         );
         assert_eq!(
             delivery_for(&SystemEvent::FileRootMounted),
+            DeliveryKind::Publish
+        );
+        assert_eq!(
+            delivery_for(&SystemEvent::MessageSent),
+            DeliveryKind::Publish
+        );
+        assert_eq!(
+            delivery_for(&SystemEvent::DirectMessageSent),
+            DeliveryKind::Publish
+        );
+        assert_eq!(
+            delivery_for(&SystemEvent::ChannelCreated),
             DeliveryKind::Publish
         );
     }

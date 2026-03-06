@@ -46,6 +46,24 @@ pub mod topics {
     pub const MYSE_SESSION_STOPPED: &str = "myse.session.stopped";
     pub const MYSE_SESSION_EXPIRED: &str = "myse.session.expired";
     pub const MYSE_SESSION_DESTROYED: &str = "myse.session.destroyed";
+
+    pub const TING_CHANNEL_CREATED: &str = "ting.channel.created";
+    pub const TING_CHANNEL_PROMOTED: &str = "ting.channel.promoted";
+    pub const TING_CHANNEL_JOINED: &str = "ting.channel.joined";
+    pub const TING_CHANNEL_LEFT: &str = "ting.channel.left";
+    pub const TING_CHANNEL_INVITED: &str = "ting.channel.invited";
+    pub const TING_MESSAGE_SENT: &str = "ting.message.sent";
+    pub const TING_DM_SENT: &str = "ting.dm.sent";
+    pub const TING_CHANNEL_READ_MARKED: &str = "ting.channel.read_marked";
+    pub const TING_DM_READ_MARKED: &str = "ting.dm.read_marked";
+
+    pub const HJUL_SCHEDULE_FIRED: &str = "hjul.schedule.fired";
+    pub const HJUL_SUBSCRIPTION_TRIGGERED: &str = "hjul.subscription.triggered";
+    pub const HJUL_WEBHOOK_RECEIVED: &str = "hjul.webhook.received";
+    pub const HJUL_JOB_STARTED: &str = "hjul.job.started";
+    pub const HJUL_JOB_COMPLETED: &str = "hjul.job.completed";
+    pub const HJUL_JOB_ERRORED: &str = "hjul.job.errored";
+    pub const HJUL_JOB_QUEUED: &str = "hjul.job.queued";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +72,9 @@ pub enum SystemEvent {
     MemorySyncRequested,
     FileRootMounted,
     ContainerSpawnRequested,
+    MessageSent,
+    DirectMessageSent,
+    ChannelCreated,
 }
 
 impl SystemEvent {
@@ -63,6 +84,9 @@ impl SystemEvent {
             Self::MemorySyncRequested => topics::VIS_MEMORY_SYNC_REQUESTED,
             Self::FileRootMounted => topics::BOD_ROOT_MOUNTED,
             Self::ContainerSpawnRequested => topics::SKIP_CONTAINER_SPAWN_REQUESTED,
+            Self::MessageSent => topics::TING_MESSAGE_SENT,
+            Self::DirectMessageSent => topics::TING_DM_SENT,
+            Self::ChannelCreated => topics::TING_CHANNEL_CREATED,
         }
     }
 }
@@ -80,6 +104,12 @@ mod tests {
         assert_eq!(
             SystemEvent::ContainerSpawnRequested.topic(),
             topics::SKIP_CONTAINER_SPAWN_REQUESTED
+        );
+        assert_eq!(SystemEvent::MessageSent.topic(), topics::TING_MESSAGE_SENT);
+        assert_eq!(SystemEvent::DirectMessageSent.topic(), topics::TING_DM_SENT);
+        assert_eq!(
+            SystemEvent::ChannelCreated.topic(),
+            topics::TING_CHANNEL_CREATED
         );
     }
 
@@ -107,6 +137,19 @@ mod tests {
     }
 
     #[test]
+    fn ting_topics_are_stable() {
+        assert_eq!(topics::TING_CHANNEL_CREATED, "ting.channel.created");
+        assert_eq!(topics::TING_CHANNEL_PROMOTED, "ting.channel.promoted");
+        assert_eq!(topics::TING_CHANNEL_JOINED, "ting.channel.joined");
+        assert_eq!(topics::TING_CHANNEL_LEFT, "ting.channel.left");
+        assert_eq!(topics::TING_CHANNEL_INVITED, "ting.channel.invited");
+        assert_eq!(topics::TING_MESSAGE_SENT, "ting.message.sent");
+        assert_eq!(topics::TING_DM_SENT, "ting.dm.sent");
+        assert_eq!(topics::TING_CHANNEL_READ_MARKED, "ting.channel.read_marked");
+        assert_eq!(topics::TING_DM_READ_MARKED, "ting.dm.read_marked");
+    }
+
+    #[test]
     fn myse_topics_are_stable() {
         assert_eq!(topics::MYSE_SESSION_CREATED, "myse.session.created");
         assert_eq!(topics::MYSE_SESSION_READY, "myse.session.ready");
@@ -116,5 +159,19 @@ mod tests {
         assert_eq!(topics::MYSE_SESSION_STOPPED, "myse.session.stopped");
         assert_eq!(topics::MYSE_SESSION_EXPIRED, "myse.session.expired");
         assert_eq!(topics::MYSE_SESSION_DESTROYED, "myse.session.destroyed");
+    }
+
+    #[test]
+    fn hjul_topics_are_stable() {
+        assert_eq!(topics::HJUL_SCHEDULE_FIRED, "hjul.schedule.fired");
+        assert_eq!(
+            topics::HJUL_SUBSCRIPTION_TRIGGERED,
+            "hjul.subscription.triggered"
+        );
+        assert_eq!(topics::HJUL_WEBHOOK_RECEIVED, "hjul.webhook.received");
+        assert_eq!(topics::HJUL_JOB_STARTED, "hjul.job.started");
+        assert_eq!(topics::HJUL_JOB_COMPLETED, "hjul.job.completed");
+        assert_eq!(topics::HJUL_JOB_ERRORED, "hjul.job.errored");
+        assert_eq!(topics::HJUL_JOB_QUEUED, "hjul.job.queued");
     }
 }
