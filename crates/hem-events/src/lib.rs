@@ -21,6 +21,8 @@ pub mod topics {
     pub const SMI_AGENT_COMPLETED: &str = "smi.agent.completed";
     pub const SMI_AGENT_ERRORED: &str = "smi.agent.errored";
     pub const SMI_AGENT_STOPPED: &str = "smi.agent.stopped";
+    pub const SMI_HARNESS_HEALTHY: &str = "smi.harness.healthy";
+    pub const SMI_HARNESS_UNHEALTHY: &str = "smi.harness.unhealthy";
     pub const SMI_LOOP_ITERATION: &str = "smi.loop.iteration";
     pub const SMI_LOOP_STOP_CONDITION_EVALUATED: &str = "smi.loop.stop_condition_evaluated";
 
@@ -119,6 +121,8 @@ mod tests {
         assert_eq!(topics::BOD_ROOT_CREATED, "bod.root.created");
         assert_eq!(topics::VIS_CONTEXT_INJECTED, "vis.context.injected");
         assert_eq!(topics::SMI_AGENT_STARTED, "smi.agent.started");
+        assert_eq!(topics::SMI_HARNESS_HEALTHY, "smi.harness.healthy");
+        assert_eq!(topics::SMI_HARNESS_UNHEALTHY, "smi.harness.unhealthy");
         assert_eq!(
             topics::SMI_LOOP_STOP_CONDITION_EVALUATED,
             "smi.loop.stop_condition_evaluated"

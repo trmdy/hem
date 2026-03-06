@@ -4572,6 +4572,7 @@ dependencies = [
  "chrono",
  "clap",
  "prost",
+ "prost-types",
  "protoc-bin-vendored",
  "serde",
  "serde_json",
@@ -4586,18 +4587,25 @@ dependencies = [
 name = "smi-core"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "async-trait",
  "chrono",
  "hem-client",
  "libc",
  "petgraph 0.6.5",
+ "prost",
+ "prost-types",
+ "protoc-bin-vendored",
  "reqwest",
  "serde",
  "serde_json",
  "skip-core",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "toml",
+ "tonic",
+ "tonic-build",
  "valhall-config",
 ]
 
@@ -4605,8 +4613,11 @@ dependencies = [
 name = "smid"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
+ "chrono",
  "clap",
  "prost",
+ "prost-types",
  "protoc-bin-vendored",
  "serde",
  "serde_json",
@@ -4617,6 +4628,7 @@ dependencies = [
  "toml",
  "tonic",
  "tonic-build",
+ "tonic-health",
  "tracing",
  "tracing-subscriber",
  "valhall-config",
