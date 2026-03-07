@@ -297,6 +297,30 @@ impl HemStore {
         })
     }
 
+    pub fn get_secret_values_without_access_update(
+        &self,
+        scope: &SecretScope,
+        name: &str,
+    ) -> Result<HashMap<String, String>> {
+        scope.validate()?;
+        validate_secret_name(name)?;
+        let path = self.secret_file_path(scope, name);
+        if !path.exists() {
+            return Err(HemError::SecretNotFound(format!(
+                "{}/{}",
+                scope_label(scope),
+                name
+            )));
+        }
+        let file = read_secret_file(path.as_path())?;
+        let mut values = HashMap::new();
+        for (key, cipher) in &file.values {
+            let plain = self.decrypt_secret_value(scope, name, key.as_str(), cipher)?;
+            values.insert(key.clone(), plain);
+        }
+        Ok(values)
+    }
+
     pub fn get_secret_info(&self, scope: &SecretScope, name: &str) -> Result<SecretInfo> {
         scope.validate()?;
         validate_secret_name(name)?;
@@ -1048,6 +1072,38 @@ mod tests {
             Some(&"sk-test-123".to_string())
         );
         assert_eq!(secret.values.get("org"), Some(&"acme".to_string()));
+    }
+
+    #[test]
+    fn get_secret_values_without_access_update_does_not_touch_metadata() {
+        let root = tempfile::tempdir().expect("tempdir");
+        HemStore::init(root.path(), false).expect("init");
+        let store = HemStore::open(root.path()).expect("open");
+
+        store
+            .set_secret(SetSecretInput {
+                scope: SecretScope::Global,
+                name: "scan-target".to_string(),
+                values: HashMap::from([("api_key".to_string(), "sk-test-123".to_string())]),
+                description: "scan target".to_string(),
+                requires_approval: false,
+                group: None,
+                actor: "tester".to_string(),
+            })
+            .expect("set");
+        let before = store
+            .get_secret_info(&SecretScope::Global, "scan-target")
+            .expect("info before");
+        let values = store
+            .get_secret_values_without_access_update(&SecretScope::Global, "scan-target")
+            .expect("values");
+        assert_eq!(values.get("api_key"), Some(&"sk-test-123".to_string()));
+        let after = store
+            .get_secret_info(&SecretScope::Global, "scan-target")
+            .expect("info after");
+        assert_eq!(before.last_accessed_at, after.last_accessed_at);
+        assert_eq!(before.last_accessed_by, after.last_accessed_by);
+        assert_eq!(before.updated_at, after.updated_at);
     }
 
     #[test]

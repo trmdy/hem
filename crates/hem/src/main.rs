@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
-    io::{self, IsTerminal, Write},
+    io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -29,8 +29,8 @@ use proto::{
     GrantAccessRequest, HealthRequest, ImportSecretsRequest, InitHemRequest,
     IssueAgentTokenRequest, IssueServiceTokenRequest, ListActiveTokensRequest, ListGrantsRequest,
     ListPendingApprovalsRequest, ListSecretsRequest, ResolveApprovalRequest, RevokeAccessRequest,
-    RevokeTokenRequest, RotateMasterKeyRequest, ScopeResolutionContext, ScopeSelector, SecretRef,
-    SecretScope, SecretValue, SetSecretRequest,
+    RevokeTokenRequest, RotateMasterKeyRequest, ScanForSecretsRequest, ScopeResolutionContext,
+    ScopeSelector, SecretRef, SecretScope, SecretValue, SetSecretRequest,
 };
 
 const SECRET_REF_FORMATS: &str =
@@ -39,6 +39,7 @@ const AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const DEFAULT_HEM_SUBDIR: &str = ".valhall/hem";
 const DEFAULT_HEM_SYSTEM_DAEMONS_SUBDIR: &str = ".valhall/system-daemons/data/hem";
 const OPERATOR_TOKEN_FILE: &str = "operator.token";
+const DEFAULT_SCAN_MIN_VALUE_LENGTH: u32 = 8;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -118,7 +119,7 @@ enum Commands {
     },
     #[command(
         about = "Read a secret by name or full reference",
-        after_help = "Examples:\n  hem get openai-prod\n  hem get project/acme/openai-prod api_key\n  hem get openai-prod api_key --project acme\n\nIf get returns pending_request_id:\n  hem approvals\n  hem approve <request-id>\n  hem get openai-prod --approval-receipt <receipt>\n\nIf SECRET is unscoped (<name>), resolution is identity -> project -> global."
+        after_help = "Examples:\n  hem get openai-prod\n  hem get project/acme/openai-prod api_key\n  hem get openai-prod api_key --project acme\n\nIf KEY is provided, stdout is the raw value only (no metadata).\n\nIf get returns pending_request_id:\n  hem approvals\n  hem approve <request-id>\n  hem get openai-prod --approval-receipt <receipt>\n\nIf SECRET is unscoped (<name>), resolution is identity -> project -> global."
     )]
     #[command(visible_alias = "g")]
     Get {
@@ -137,6 +138,25 @@ enum Commands {
         approval_receipt: Option<String>,
         #[arg(long, default_value = "")]
         reason: String,
+    },
+    #[command(
+        about = "Scan stdin for leaked secret values",
+        visible_alias = "sc",
+        after_help = "Reads text from stdin and checks whether any Hem secret values appear as substrings.\n\nExit codes:\n  0 clean\n  1 one or more secret values detected\n  2 scan error (auth/rpc/invalid input)"
+    )]
+    Scan {
+        #[arg(
+            long,
+            value_name = "SCOPE",
+            help = "Limit scan to: global | project/<project> | identity/<identity_id>"
+        )]
+        scope: Option<String>,
+        #[arg(long, default_value_t = DEFAULT_SCAN_MIN_VALUE_LENGTH)]
+        min_length: u32,
+        #[arg(long, short = 'q')]
+        quiet: bool,
+        #[arg(long)]
+        json: bool,
     },
     #[command(
         about = "Search secrets by name/scope/group/description",
@@ -384,21 +404,25 @@ enum ExamplesFormat {
 
 #[tokio::main]
 async fn main() {
-    if let Err(err) = run().await {
-        eprintln!("{err}");
-        std::process::exit(1);
+    let cli = Cli::parse();
+    let scan_command = matches!(cli.command, Commands::Scan { .. });
+    match run(cli).await {
+        Ok(code) => std::process::exit(code),
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(if scan_command { 2 } else { 1 });
+        }
     }
 }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
     if let Commands::Examples { format } = &cli.command {
         print_examples(*format)?;
-        return Ok(());
+        return Ok(0);
     }
     if let Commands::Usage = &cli.command {
         print_usage();
-        return Ok(());
+        return Ok(0);
     }
 
     let endpoint = daemon_endpoint(cli.endpoint);
@@ -482,6 +506,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             approval_receipt,
             reason,
         } => {
+            let requested_key = key.and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
             let lookup = parse_lookup(secret.as_str())?;
             let response = client
                 .get_secret(GetSecretRequest {
@@ -490,7 +522,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         identity_id: identity_id.unwrap_or_default(),
                         project: project.unwrap_or_default(),
                     }),
-                    key: key.unwrap_or_default(),
+                    key: requested_key.clone().unwrap_or_default(),
                     async_read: false,
                     wait_timeout_ms: 0,
                     reason,
@@ -501,14 +533,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             match response.result {
                 Some(get_secret_response::Result::Secret(secret)) => {
-                    let info = secret.info.ok_or("missing secret info in get response")?;
-                    print_kv("name", info.name);
-                    if let Some(scope) = info.scope.as_ref() {
-                        print_kv("scope", format_scope(scope));
-                    }
-                    print_table_header(&["KEY", "VALUE"]);
-                    for (entry_key, entry_value) in secret.values {
-                        println!("{entry_key}={entry_value}");
+                    if let Some(requested_key) = requested_key.as_deref() {
+                        println!("{}", required_secret_key_value(&secret, requested_key)?);
+                    } else {
+                        let info = secret.info.ok_or("missing secret info in get response")?;
+                        print_kv("name", info.name);
+                        if let Some(scope) = info.scope.as_ref() {
+                            print_kv("scope", format_scope(scope));
+                        }
+                        print_table_header(&["KEY", "VALUE"]);
+                        let mut entries = secret.values.into_iter().collect::<Vec<_>>();
+                        entries.sort_by(|left, right| left.0.cmp(&right.0));
+                        for (entry_key, entry_value) in entries {
+                            println!("{entry_key}={entry_value}");
+                        }
                     }
                 }
                 Some(get_secret_response::Result::Pending(pending)) => {
@@ -516,6 +554,57 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     print_kv("message", pending.message);
                 }
                 None => return Err("missing get response result".into()),
+            }
+        }
+        Commands::Scan {
+            scope,
+            min_length,
+            quiet,
+            json,
+        } => {
+            let mut text = String::new();
+            io::stdin().read_to_string(&mut text)?;
+            let scope = scope
+                .map(|value| parse_scope_selector_value(value.as_str()))
+                .transpose()?;
+            let response = client
+                .scan_for_secrets(ScanForSecretsRequest {
+                    text,
+                    scope,
+                    min_value_length: min_length,
+                })
+                .await?
+                .into_inner();
+
+            if json {
+                let payload = ScanOutput {
+                    clean: response.clean,
+                    matches: response
+                        .matches
+                        .into_iter()
+                        .map(|item| ScanOutputMatch {
+                            secret: item.secret_ref,
+                            key: item.key,
+                            offset: item.offset,
+                        })
+                        .collect(),
+                    scanned_length: response.scanned_length,
+                    secrets_checked: response.secrets_checked,
+                };
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else if !quiet {
+                for item in &response.matches {
+                    println!("match   {} (key: {})", item.secret_ref, item.key);
+                }
+                if response.clean {
+                    println!("result  clean");
+                } else {
+                    println!("result  {} secrets detected", response.matches.len());
+                }
+            }
+
+            if !response.clean {
+                return Ok(1);
             }
         }
         Commands::Search { query, limit } => {
@@ -1042,7 +1131,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    Ok(())
+    Ok(0)
 }
 
 fn daemon_endpoint(override_value: Option<String>) -> String {
@@ -1393,6 +1482,17 @@ fn secret_value_from_parts(
         key: key.to_string(),
         value: resolve_value_source(value.to_string())?,
     })
+}
+
+fn required_secret_key_value(
+    secret: &proto::SecretWithValues,
+    key: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    secret
+        .values
+        .get(key)
+        .cloned()
+        .ok_or_else(|| format!("missing requested key '{key}' in get response").into())
 }
 
 fn resolve_value_source(value: String) -> Result<String, Box<dyn std::error::Error>> {
@@ -1790,10 +1890,11 @@ fn print_examples(format: ExamplesFormat) -> Result<(), Box<dyn std::error::Erro
 
 fn print_usage() {
     println!("Hem usage");
-    println!("  Shorthands: h health, i init, s set, g get, l/ls search, ar archive, del/rm delete, ap approvals, ok approve, no deny, t token, ga grant-access, ra revoke-access, lg list-grants, au audit, ex export, im import, ro rotate, eg examples, u usage");
+    println!("  Shorthands: h health, i init, s set, g get, sc scan, l/ls search, ar archive, del/rm delete, ap approvals, ok approve, no deny, t token, ga grant-access, ra revoke-access, lg list-grants, au audit, ex export, im import, ro rotate, eg examples, u usage");
     println!();
     println!("  hem s openai-prod api_key=...");
     println!("  hem g openai-prod api_key");
+    println!("  echo \"hello\" | hem sc");
     println!("  hem l 'project/*/openai-*'");
     println!("  hem ap");
     println!("  hem u");
@@ -1830,6 +1931,8 @@ fn render_examples_shell() -> String {
         "hem set openai-prod api_key=op://Personal/openai-prod/api_key",
         "hem set openai-prod --from-op-item op://Personal/openai-prod",
         "hem get openai-prod",
+        "echo 'text to check' | hem scan",
+        "echo 'text to check' | hem scan --quiet",
         "hem search 'project/*/openai-*'",
         "hem archive global/openai-prod",
         "# token flow",
@@ -1911,6 +2014,21 @@ struct ArchivedSecret {
 }
 
 #[derive(Debug, Serialize)]
+struct ScanOutput {
+    clean: bool,
+    matches: Vec<ScanOutputMatch>,
+    scanned_length: u32,
+    secrets_checked: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct ScanOutputMatch {
+    secret: String,
+    key: String,
+    offset: u32,
+}
+
+#[derive(Debug, Serialize)]
 struct HemExamples {
     version: &'static str,
     generated_at_epoch_ms: u128,
@@ -1973,6 +2091,15 @@ impl Default for HemExamples {
                     commands: vec![
                         "hem get openai-prod",
                         "hem get project/acme/cloudflare token",
+                    ],
+                },
+                WorkflowExamples {
+                    name: "scan_for_secret_leaks",
+                    purpose: "scan stdin for leaked secret values",
+                    commands: vec![
+                        "echo 'text to check' | hem scan",
+                        "echo 'text to check' | hem scan --quiet",
+                        "echo 'text to check' | hem scan --scope project/acme --json",
                     ],
                 },
                 WorkflowExamples {
@@ -2152,6 +2279,8 @@ mod tests {
         let body = render_examples(ExamplesFormat::Json).expect("must render json examples");
         assert!(body.contains("\"version\": \"hem-examples-v1\""));
         assert!(body.contains("\"delete_with_approval\""));
+        assert!(body.contains("\"scan_for_secret_leaks\""));
+        assert!(body.contains("hem scan --quiet"));
         assert!(body.contains("hem approve <request-id>"));
         assert!(body.contains("\"grants\""));
         assert!(body.contains("\"audit\""));
@@ -2292,6 +2421,28 @@ mod tests {
         assert!(merged
             .iter()
             .any(|item| item.key == "region" && item.value == "us"));
+    }
+
+    #[test]
+    fn required_secret_key_value_returns_value() {
+        let secret = proto::SecretWithValues {
+            info: None,
+            values: HashMap::from([("api_key".to_string(), "secret-1".to_string())]),
+        };
+        let value = required_secret_key_value(&secret, "api_key").expect("key should exist");
+        assert_eq!(value, "secret-1");
+    }
+
+    #[test]
+    fn required_secret_key_value_errors_when_missing() {
+        let secret = proto::SecretWithValues {
+            info: None,
+            values: HashMap::new(),
+        };
+        let err = required_secret_key_value(&secret, "api_key").expect_err("must reject");
+        assert!(err
+            .to_string()
+            .contains("missing requested key 'api_key' in get response"));
     }
 
     #[test]

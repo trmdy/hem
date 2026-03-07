@@ -10,6 +10,7 @@ service HemRuntime {
   rpc DeleteSecret(DeleteSecretRequest) returns (DeleteSecretResponse);
   rpc ListSecrets(ListSecretsRequest) returns (ListSecretsResponse);
   rpc GetSecrets(GetSecretsRequest) returns (GetSecretsResponse);
+  rpc ScanForSecrets(ScanForSecretsRequest) returns (ScanForSecretsResponse);
 
   // Groups
   rpc SetGroup(SetGroupRequest) returns (GroupInfo);
@@ -204,6 +205,25 @@ message SecretBatchResult {
 
 message GetSecretsResponse {
   repeated SecretBatchResult results = 1;
+}
+
+message ScanForSecretsRequest {
+  string text = 1;
+  ScopeSelector scope = 2;
+  uint32 min_value_length = 3;
+}
+
+message ScanMatch {
+  string secret_ref = 1;
+  string key = 2;
+  uint32 offset = 3;
+}
+
+message ScanForSecretsResponse {
+  bool clean = 1;
+  repeated ScanMatch matches = 2;
+  uint32 scanned_length = 3;
+  uint32 secrets_checked = 4;
 }
 
 message GroupInfo {

@@ -41,9 +41,14 @@ hem set openai-prod api_key=... --approval-receipt <receipt>
 
 # get
 hem get openai-prod
-hem get project/acme/cloudflare token
+hem get project/acme/cloudflare token   # raw value on stdout
 # if read requires approval:
 hem get openai-prod --approval-receipt <receipt>
+
+# scan outgoing text for secret leaks
+echo "text to check" | hem scan
+echo "text to check" | hem scan --quiet
+echo "text to check" | hem scan --scope project/acme --json
 
 # search (quote wildcards)
 hem search openai

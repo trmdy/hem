@@ -47,7 +47,8 @@ use proto::{
     ListSecretsRequest, ListSecretsResponse, RemoveFromGroupRequest, RemoveFromGroupResponse,
     ResolveApprovalRequest, ResolveApprovalResponse, RevokeAccessRequest, RevokeAccessResponse,
     RevokeTokenRequest, RevokeTokenResponse, RotateMasterKeyRequest, RotateMasterKeyResponse,
-    SecretInfo, SetGroupRequest, SetSecretRequest, TokenInfo,
+    ScanForSecretsRequest, ScanForSecretsResponse, SecretInfo, SetGroupRequest, SetSecretRequest,
+    TokenInfo,
 };
 
 const DEFAULT_BIND: &str = "127.0.0.1:50091";
@@ -61,6 +62,7 @@ const AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const APPROVAL_RECEIPT_METADATA_KEY: &str = "x-hem-approval-receipt";
 const DEFAULT_GET_APPROVAL_REASON: &str = "read requires approval";
 const DEFAULT_SET_APPROVAL_REASON: &str = "write requires approval";
+const DEFAULT_SCAN_MIN_VALUE_LENGTH: u32 = 8;
 
 #[derive(Debug, Parser)]
 #[command(name = "hemd", about = "Valhall Hem daemon")]
@@ -287,6 +289,20 @@ struct CallerPrincipal {
     token_id: String,
     claims: TokenClaims,
     is_operator: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ScanCandidate {
+    secret_ref: String,
+    key: String,
+    value: String,
+}
+
+#[derive(Debug, Clone)]
+struct ScanMatchRecord {
+    secret_ref: String,
+    key: String,
+    offset: u32,
 }
 
 trait ApprovalProvider: Send + Sync + std::fmt::Debug {
@@ -989,6 +1005,93 @@ impl HemRuntime for HemRuntimeService {
         }
 
         Ok(Response::new(GetSecretsResponse { results }))
+    }
+
+    async fn scan_for_secrets(
+        &self,
+        request: Request<ScanForSecretsRequest>,
+    ) -> Result<Response<ScanForSecretsResponse>, Status> {
+        let store = self.open_store()?;
+        let caller = self.require_caller(&store, &request)?;
+        let req = request.into_inner();
+        let scope = parse_optional_scope_selector(req.scope)?;
+        let min_value_length = if req.min_value_length == 0 {
+            DEFAULT_SCAN_MIN_VALUE_LENGTH
+        } else {
+            req.min_value_length
+        } as usize;
+
+        let mut secrets = store
+            .list_secrets(scope.as_ref())
+            .map_err(status_from_hem)?;
+        if !caller.is_operator {
+            secrets.retain(|item| {
+                let has_grant = self
+                    .has_explicit_read_grant(
+                        &store,
+                        &caller.claims,
+                        &item.scope,
+                        item.name.as_str(),
+                    )
+                    .unwrap_or(false);
+                authorize_read(&caller.claims, &item.scope, has_grant).is_ok()
+            });
+        }
+
+        let mut candidates = Vec::new();
+        for info in secrets {
+            let secret_ref = format!("{}/{}", scope_label(&info.scope), info.name);
+            let values = store
+                .get_secret_values_without_access_update(&info.scope, info.name.as_str())
+                .map_err(status_from_hem)?;
+            for (key, value) in values {
+                if value.len() < min_value_length {
+                    continue;
+                }
+                candidates.push(ScanCandidate {
+                    secret_ref: secret_ref.clone(),
+                    key,
+                    value,
+                });
+            }
+        }
+
+        let matches = collect_scan_matches(req.text.as_str(), candidates.as_slice());
+        let scope_label = scope
+            .as_ref()
+            .map(scope_label)
+            .unwrap_or_else(|| "all".to_string());
+        self.audit(
+            &store,
+            Some(&caller),
+            "scan_for_secrets",
+            None,
+            if matches.is_empty() {
+                "clean"
+            } else {
+                "detected"
+            },
+            format!(
+                "matches={} secrets_checked={} scope={scope_label}",
+                matches.len(),
+                candidates.len()
+            )
+            .as_str(),
+        );
+
+        Ok(Response::new(ScanForSecretsResponse {
+            clean: matches.is_empty(),
+            matches: matches
+                .into_iter()
+                .map(|item| proto::ScanMatch {
+                    secret_ref: item.secret_ref,
+                    key: item.key,
+                    offset: item.offset,
+                })
+                .collect(),
+            scanned_length: req.text.len().min(u32::MAX as usize) as u32,
+            secrets_checked: candidates.len().min(u32::MAX as usize) as u32,
+        }))
     }
 
     async fn set_group(
@@ -2042,6 +2145,29 @@ fn parse_subject(label: &str, value: &str) -> Result<String, Status> {
     Ok(value.to_string())
 }
 
+fn collect_scan_matches(text: &str, candidates: &[ScanCandidate]) -> Vec<ScanMatchRecord> {
+    let mut out = Vec::new();
+    for candidate in candidates {
+        if candidate.value.is_empty() {
+            continue;
+        }
+        for (offset, _) in text.match_indices(candidate.value.as_str()) {
+            out.push(ScanMatchRecord {
+                secret_ref: candidate.secret_ref.clone(),
+                key: candidate.key.clone(),
+                offset: offset.min(u32::MAX as usize) as u32,
+            });
+        }
+    }
+    out.sort_by(|left, right| {
+        left.offset
+            .cmp(&right.offset)
+            .then(left.secret_ref.cmp(&right.secret_ref))
+            .then(left.key.cmp(&right.key))
+    });
+    out
+}
+
 fn normalize_optional_string(value: String) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -2322,4 +2448,45 @@ fn print_usage() {
     println!("  hemd --data-dir ~/.valhall/hem");
     println!("  hemd --once");
     println!("  hemd u");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collect_scan_matches_reports_offsets_and_sorts() {
+        let candidates = vec![
+            ScanCandidate {
+                secret_ref: "global/openai-prod".to_string(),
+                key: "api_key".to_string(),
+                value: "abc123".to_string(),
+            },
+            ScanCandidate {
+                secret_ref: "global/tobber-telegram".to_string(),
+                key: "bot_token".to_string(),
+                value: "xyz".to_string(),
+            },
+        ];
+        let matches =
+            collect_scan_matches("prefix xyz and abc123 then abc123", candidates.as_slice());
+        assert_eq!(matches.len(), 3);
+        assert_eq!(matches[0].secret_ref, "global/tobber-telegram");
+        assert_eq!(matches[0].offset, 7);
+        assert_eq!(matches[1].secret_ref, "global/openai-prod");
+        assert_eq!(matches[1].offset, 15);
+        assert_eq!(matches[2].secret_ref, "global/openai-prod");
+        assert_eq!(matches[2].offset, 27);
+    }
+
+    #[test]
+    fn collect_scan_matches_skips_empty_values() {
+        let candidates = vec![ScanCandidate {
+            secret_ref: "global/empty".to_string(),
+            key: "value".to_string(),
+            value: String::new(),
+        }];
+        let matches = collect_scan_matches("any text", candidates.as_slice());
+        assert!(matches.is_empty());
+    }
 }
