@@ -23,3 +23,5 @@ coverage
 # Swarm local runtime state
 .swarm-runtime/
 configs/swarm/identities.env
+
+.worktrees
