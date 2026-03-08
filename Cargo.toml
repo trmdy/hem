@@ -27,6 +27,7 @@ members = [
   "crates/vis",
   "crates/vis-core",
   "crates/visd",
+  "crates/vh",
   "crates/fj",
   "crates/fjell-core",
   "crates/verk",
