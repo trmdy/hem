@@ -16,7 +16,7 @@ use tonic::{
     metadata::MetadataValue,
     service::Interceptor,
     transport::{Channel, Endpoint},
-    Request, Status,
+    Code, Request, Status,
 };
 
 pub mod proto {
@@ -94,7 +94,7 @@ enum Commands {
         values: Vec<String>,
         #[arg(
             long,
-            help = "Prompt for secret values interactively (values not passed on command line/history)"
+            help = "Prompt for secret values interactively (values not passed on command line/history; merges with existing keys when the secret already exists)"
         )]
         interactive: bool,
         #[arg(
@@ -458,6 +458,11 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
             reason,
         } => {
             let secret_ref = parse_secret_ref_or_global(secret.as_str())?;
+            let existing = if interactive {
+                fetch_existing_secret_values(&mut client, &secret_ref).await?
+            } else {
+                Vec::new()
+            };
             let imported = if let Some(item_ref) = from_op_item {
                 read_op_item_values(item_ref.as_str())?
             } else {
@@ -470,7 +475,7 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
             } else {
                 parse_values(values)?
             };
-            let values = merge_secret_values(imported, explicit);
+            let values = build_set_values(existing, imported, explicit);
             if values.is_empty() {
                 return Err("at least one key=value pair required".into());
             }
@@ -1264,6 +1269,14 @@ fn parse_values(values: Vec<String>) -> Result<Vec<SecretValue>, Box<dyn std::er
     Ok(out)
 }
 
+fn build_set_values(
+    existing: Vec<SecretValue>,
+    imported: Vec<SecretValue>,
+    explicit: Vec<SecretValue>,
+) -> Vec<SecretValue> {
+    merge_secret_values(existing, merge_secret_values(imported, explicit))
+}
+
 fn merge_secret_values(base: Vec<SecretValue>, overrides: Vec<SecretValue>) -> Vec<SecretValue> {
     let mut merged = BTreeMap::<String, String>::new();
     for entry in base {
@@ -1276,6 +1289,50 @@ fn merge_secret_values(base: Vec<SecretValue>, overrides: Vec<SecretValue>) -> V
         .into_iter()
         .map(|(key, value)| SecretValue { key, value })
         .collect()
+}
+
+fn secret_values_from_map(values: HashMap<String, String>) -> Vec<SecretValue> {
+    values
+        .into_iter()
+        .map(|(key, value)| SecretValue { key, value })
+        .collect()
+}
+
+async fn fetch_existing_secret_values(
+    client: &mut HemRuntimeClient<InterceptedService<Channel, BearerAuthInterceptor>>,
+    secret_ref: &SecretRef,
+) -> Result<Vec<SecretValue>, Box<dyn std::error::Error>> {
+    let response = match client
+        .get_secret(GetSecretRequest {
+            lookup: Some(get_secret_request::Lookup::Secret(secret_ref.clone())),
+            context: Some(ScopeResolutionContext {
+                identity_id: String::new(),
+                project: String::new(),
+            }),
+            key: String::new(),
+            async_read: false,
+            wait_timeout_ms: 0,
+            reason: "merge existing values for interactive hem set".to_string(),
+            approval_receipt: String::new(),
+        })
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(status) if status.code() == Code::NotFound => return Ok(Vec::new()),
+        Err(status) => return Err(status.into()),
+    };
+
+    match response.result {
+        Some(get_secret_response::Result::Secret(secret)) => {
+            Ok(secret_values_from_map(secret.values))
+        }
+        Some(get_secret_response::Result::Pending(pending)) => Err(format!(
+            "interactive set could not merge existing keys because reading the current secret is pending approval request_id={}",
+            pending.request_id
+        )
+        .into()),
+        None => Err("missing get response result".into()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2421,6 +2478,49 @@ mod tests {
         assert!(merged
             .iter()
             .any(|item| item.key == "region" && item.value == "us"));
+    }
+
+    #[test]
+    fn build_set_values_preserves_existing_keys_for_interactive_updates() {
+        let merged = build_set_values(
+            vec![
+                SecretValue {
+                    key: "api_key".to_string(),
+                    value: "old".to_string(),
+                },
+                SecretValue {
+                    key: "region".to_string(),
+                    value: "eu".to_string(),
+                },
+            ],
+            Vec::new(),
+            vec![SecretValue {
+                key: "api_key".to_string(),
+                value: "new".to_string(),
+            }],
+        );
+        assert_eq!(merged.len(), 2);
+        assert!(merged
+            .iter()
+            .any(|item| item.key == "api_key" && item.value == "new"));
+        assert!(merged
+            .iter()
+            .any(|item| item.key == "region" && item.value == "eu"));
+    }
+
+    #[test]
+    fn secret_values_from_map_converts_all_entries() {
+        let values = secret_values_from_map(HashMap::from([
+            ("api_key".to_string(), "secret".to_string()),
+            ("region".to_string(), "eu".to_string()),
+        ]));
+        assert_eq!(values.len(), 2);
+        assert!(values
+            .iter()
+            .any(|item| item.key == "api_key" && item.value == "secret"));
+        assert!(values
+            .iter()
+            .any(|item| item.key == "region" && item.value == "eu"));
     }
 
     #[test]

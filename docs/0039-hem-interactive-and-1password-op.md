@@ -8,6 +8,7 @@ Status: Active
 `hem set` now supports:
 
 - `--interactive`: prompt secret values in terminal instead of passing values on command line.
+  When the secret already exists, interactive updates merge with the existing key set and only replace keys you re-enter.
 - `op://` value resolution: any `KEY=op://...` value is resolved via `op read` before sending to `hemd`.
 - `--from-op-item`: import all non-empty fields from one 1Password item into the target Hem secret.
 
@@ -40,6 +41,7 @@ hem set openai-prod --from-op-item op://Personal/openai-prod env=prod
 ## Notes
 
 - interactive mode requires a TTY.
+- interactive mode now reads the current secret first and fails instead of overwriting a subset if that read cannot be completed.
 - `op://` resolution depends on `op` CLI being installed and authenticated.
 - only value is resolved; keys remain explicit on the command.
 - whole-item import calls `op item get --format json --reveal`.
