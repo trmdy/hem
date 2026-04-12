@@ -39,6 +39,12 @@ pub mod topics {
     pub const SLIK_TASK_RELEASED: &str = "slik.task.released";
     pub const SLIK_TASK_UPDATED: &str = "slik.task.updated";
     pub const SLIK_TASK_COMPLETED: &str = "slik.task.completed";
+    pub const SLIK_FOLLOW_UP_CREATED: &str = "slik.follow_up.created";
+    pub const SLIK_FOLLOW_UP_UPDATED: &str = "slik.follow_up.updated";
+    pub const SLIK_ATTENTION_ITEM_CREATED: &str = "slik.attention_item.created";
+    pub const SLIK_ATTENTION_ITEM_UPDATED: &str = "slik.attention_item.updated";
+    pub const SLIK_RWP_CREATED: &str = "slik.rwp.created";
+    pub const SLIK_RWP_UPDATED: &str = "slik.rwp.updated";
 
     pub const MYSE_SESSION_CREATED: &str = "myse.session.created";
     pub const MYSE_SESSION_READY: &str = "myse.session.ready";
@@ -66,6 +72,11 @@ pub mod topics {
     pub const HJUL_JOB_COMPLETED: &str = "hjul.job.completed";
     pub const HJUL_JOB_ERRORED: &str = "hjul.job.errored";
     pub const HJUL_JOB_QUEUED: &str = "hjul.job.queued";
+
+    pub const DUE_ACCOUNT_ADDED: &str = "due.account.added";
+    pub const DUE_ACCOUNT_SYNCED: &str = "due.account.synced";
+    pub const DUE_MESSAGE_NORMALIZED: &str = "due.message.normalized";
+    pub const DUE_OUTBOUND_RECORDED: &str = "due.outbound.recorded";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +149,18 @@ mod tests {
         assert_eq!(topics::SLIK_TASK_RELEASED, "slik.task.released");
         assert_eq!(topics::SLIK_TASK_UPDATED, "slik.task.updated");
         assert_eq!(topics::SLIK_TASK_COMPLETED, "slik.task.completed");
+        assert_eq!(topics::SLIK_FOLLOW_UP_CREATED, "slik.follow_up.created");
+        assert_eq!(topics::SLIK_FOLLOW_UP_UPDATED, "slik.follow_up.updated");
+        assert_eq!(
+            topics::SLIK_ATTENTION_ITEM_CREATED,
+            "slik.attention_item.created"
+        );
+        assert_eq!(
+            topics::SLIK_ATTENTION_ITEM_UPDATED,
+            "slik.attention_item.updated"
+        );
+        assert_eq!(topics::SLIK_RWP_CREATED, "slik.rwp.created");
+        assert_eq!(topics::SLIK_RWP_UPDATED, "slik.rwp.updated");
     }
 
     #[test]
@@ -177,5 +200,13 @@ mod tests {
         assert_eq!(topics::HJUL_JOB_COMPLETED, "hjul.job.completed");
         assert_eq!(topics::HJUL_JOB_ERRORED, "hjul.job.errored");
         assert_eq!(topics::HJUL_JOB_QUEUED, "hjul.job.queued");
+    }
+
+    #[test]
+    fn due_topics_are_stable() {
+        assert_eq!(topics::DUE_ACCOUNT_ADDED, "due.account.added");
+        assert_eq!(topics::DUE_ACCOUNT_SYNCED, "due.account.synced");
+        assert_eq!(topics::DUE_MESSAGE_NORMALIZED, "due.message.normalized");
+        assert_eq!(topics::DUE_OUTBOUND_RECORDED, "due.outbound.recorded");
     }
 }

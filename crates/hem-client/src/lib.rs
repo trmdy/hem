@@ -1,4 +1,4 @@
-use std::{env, fs, path::PathBuf};
+use std::{collections::HashMap, env, fs, path::PathBuf};
 
 use thiserror::Error;
 use tonic::{
@@ -14,8 +14,8 @@ pub mod proto {
 
 use proto::{
     get_secret_request, get_secret_response, hem_runtime_client::HemRuntimeClient as RpcClient,
-    GetSecretRequest, IssueAgentTokenRequest, ScopeResolutionContext, ScopeSelector, SecretRef,
-    SecretScope,
+    GetSecretRequest, IssueAgentTokenRequest, ScopeResolutionContext, ScopeSelector, SecretInfo,
+    SecretRef, SecretScope, SecretValue, SetSecretRequest,
 };
 
 pub const DEFAULT_HEMD_ENDPOINT: &str = "http://127.0.0.1:50091";
@@ -30,6 +30,19 @@ pub struct HemScopeContext {
 pub struct HemRuntimeClient {
     endpoint: String,
     token: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HemSecretRecord {
+    pub info: SecretMetadata,
+    pub values: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SecretMetadata {
+    pub description: String,
+    pub requires_approval: bool,
+    pub group: String,
 }
 
 #[derive(Debug, Error)]
@@ -122,6 +135,100 @@ impl HemRuntimeClient {
                 "missing get_secret result".to_string(),
             )),
         }
+    }
+
+    pub async fn get_secret(
+        &self,
+        secret_ref: &str,
+        context: Option<HemScopeContext>,
+    ) -> Result<Option<HemSecretRecord>, HemClientError> {
+        let mut client = self.connect().await?;
+        let lookup = get_secret_request::Lookup::Secret(parse_secret_ref_or_global(secret_ref)?);
+        let request = self.authorize_request(GetSecretRequest {
+            lookup: Some(lookup),
+            context: Some(ScopeResolutionContext {
+                identity_id: context
+                    .as_ref()
+                    .and_then(|value| value.identity_id.as_ref())
+                    .cloned()
+                    .unwrap_or_default(),
+                project: context
+                    .as_ref()
+                    .and_then(|value| value.project.as_ref())
+                    .cloned()
+                    .unwrap_or_default(),
+            }),
+            key: String::new(),
+            async_read: true,
+            wait_timeout_ms: 0,
+            reason: String::new(),
+            approval_receipt: String::new(),
+        })?;
+
+        let response = match client.get_secret(request).await {
+            Ok(response) => response,
+            Err(status) if status.code() == Code::NotFound => return Ok(None),
+            Err(status) => return Err(map_status(status)),
+        };
+        let payload = response.into_inner();
+        match payload.result {
+            Some(get_secret_response::Result::Secret(secret)) => Ok(Some(HemSecretRecord {
+                info: SecretMetadata {
+                    description: secret
+                        .info
+                        .as_ref()
+                        .map(|info| info.description.clone())
+                        .unwrap_or_default(),
+                    requires_approval: secret
+                        .info
+                        .as_ref()
+                        .map(|info| info.requires_approval)
+                        .unwrap_or(false),
+                    group: secret
+                        .info
+                        .as_ref()
+                        .map(|info| info.group.clone())
+                        .unwrap_or_default(),
+                },
+                values: secret.values,
+            })),
+            Some(get_secret_response::Result::Pending(pending)) => {
+                Err(HemClientError::ApprovalPending {
+                    request_id: pending.request_id,
+                })
+            }
+            None => Err(HemClientError::ResponseShape(
+                "missing get_secret result".to_string(),
+            )),
+        }
+    }
+
+    pub async fn set_secret(
+        &self,
+        secret_ref: &str,
+        values: HashMap<String, String>,
+        metadata: SecretMetadata,
+        actor: Option<&str>,
+    ) -> Result<SecretMetadata, HemClientError> {
+        let mut client = self.connect().await?;
+        let request = self.authorize_request(SetSecretRequest {
+            secret: Some(parse_secret_ref_or_global(secret_ref)?),
+            values: values
+                .into_iter()
+                .map(|(key, value)| SecretValue { key, value })
+                .collect(),
+            description: metadata.description.clone(),
+            requires_approval: metadata.requires_approval,
+            group: metadata.group.clone(),
+            actor: normalize_optional(actor.unwrap_or_default())
+                .unwrap_or("hem-client")
+                .to_string(),
+            approval_receipt: String::new(),
+            reason: String::new(),
+        })?;
+
+        let response = client.set_secret(request).await.map_err(map_status)?;
+        Ok(secret_metadata_from_proto(response.into_inner()))
     }
 
     pub async fn issue_agent_token(
@@ -294,4 +401,12 @@ fn normalize_optional(value: &str) -> Option<&str> {
 
 fn map_status(status: Status) -> HemClientError {
     HemClientError::Rpc(status.code(), status.message().to_string())
+}
+
+fn secret_metadata_from_proto(info: SecretInfo) -> SecretMetadata {
+    SecretMetadata {
+        description: info.description,
+        requires_approval: info.requires_approval,
+        group: info.group,
+    }
 }
