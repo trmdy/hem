@@ -41,7 +41,7 @@ const DEFAULT_HEM_SUBDIR: &str = ".valhall/hem";
 const DEFAULT_HEM_SYSTEM_DAEMONS_SUBDIR: &str = ".valhall/system-daemons/data/hem";
 const OPERATOR_TOKEN_FILE: &str = "operator.token";
 const DEFAULT_SCAN_MIN_VALUE_LENGTH: u32 = 8;
-const DEFAULT_SEARCH_LIMIT: u32 = 50;
+const DEFAULT_SEARCH_LIMIT: u32 = 100;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -2462,12 +2462,12 @@ mod tests {
     }
 
     #[test]
-    fn search_default_limit_is_50() {
+    fn search_default_limit_is_100() {
         let cli = Cli::try_parse_from(["hem", "ls"]).expect("parse cli");
         let Commands::Search { limit, .. } = cli.command else {
             panic!("expected search command");
         };
-        assert_eq!(limit, 50);
+        assert_eq!(limit, 100);
     }
 
     #[test]
