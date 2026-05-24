@@ -174,7 +174,11 @@ enum Commands {
         query: String,
         #[arg(long, default_value_t = DEFAULT_SEARCH_LIMIT)]
         limit: u32,
-        #[arg(long, help = "Split project results into project/<project> sections")]
+        #[arg(
+            short = 'p',
+            long,
+            help = "Split project results into project/<project> sections"
+        )]
         group_projects: bool,
     },
     #[command(
@@ -2479,6 +2483,15 @@ mod tests {
     #[test]
     fn search_group_projects_flag_is_parsed() {
         let cli = Cli::try_parse_from(["hem", "ls", "--group-projects"]).expect("parse cli");
+        let Commands::Search { group_projects, .. } = cli.command else {
+            panic!("expected search command");
+        };
+        assert!(group_projects);
+    }
+
+    #[test]
+    fn search_group_projects_short_flag_is_parsed() {
+        let cli = Cli::try_parse_from(["hem", "ls", "-p"]).expect("parse cli");
         let Commands::Search { group_projects, .. } = cli.command else {
             panic!("expected search command");
         };
