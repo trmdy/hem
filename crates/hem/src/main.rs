@@ -620,7 +620,7 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
                     scope: None,
                     group: String::new(),
                     prefix: String::new(),
-                    limit,
+                    limit: search_request_limit(query.as_str(), limit),
                 })
                 .await?
                 .into_inner();
@@ -629,6 +629,9 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
             for secret in response.secrets {
                 if !secret_matches_query(&secret, query.as_str()) {
                     continue;
+                }
+                if search_display_limit_reached(matched, limit) {
+                    break;
                 }
                 matched += 1;
                 let scope_selector = secret.scope.as_ref();
@@ -1864,6 +1867,18 @@ fn secret_matches_query(secret: &proto::SecretInfo, query: &str) -> bool {
         || group.contains(query)
 }
 
+fn search_request_limit(query: &str, display_limit: u32) -> u32 {
+    if query == "*" {
+        display_limit
+    } else {
+        0
+    }
+}
+
+fn search_display_limit_reached(matched: u32, display_limit: u32) -> bool {
+    display_limit > 0 && matched >= display_limit
+}
+
 fn has_wildcards(query: &str) -> bool {
     query.contains('*') || query.contains('?')
 }
@@ -2287,6 +2302,22 @@ mod tests {
         assert!(wildcard_match("ab?d", "abcd"));
         assert!(!wildcard_match("ab?d", "abxdz"));
         assert!(!wildcard_match("prod-*", "staging-key"));
+    }
+
+    #[test]
+    fn search_request_limit_fetches_all_for_filtered_queries() {
+        assert_eq!(search_request_limit("*", 25), 25);
+        assert_eq!(search_request_limit("linear", 25), 0);
+        assert_eq!(search_request_limit("*linear*", 25), 0);
+        assert_eq!(search_request_limit("global/linear*", 25), 0);
+        assert_eq!(search_request_limit("linear", 0), 0);
+    }
+
+    #[test]
+    fn search_display_limit_is_applied_after_matching() {
+        assert!(!search_display_limit_reached(24, 25));
+        assert!(search_display_limit_reached(25, 25));
+        assert!(!search_display_limit_reached(25, 0));
     }
 
     #[test]
