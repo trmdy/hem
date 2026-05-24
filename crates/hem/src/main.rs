@@ -40,6 +40,7 @@ const DEFAULT_HEM_SUBDIR: &str = ".valhall/hem";
 const DEFAULT_HEM_SYSTEM_DAEMONS_SUBDIR: &str = ".valhall/system-daemons/data/hem";
 const OPERATOR_TOKEN_FILE: &str = "operator.token";
 const DEFAULT_SCAN_MIN_VALUE_LENGTH: u32 = 8;
+const DEFAULT_SEARCH_LIMIT: u32 = 50;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -170,7 +171,7 @@ enum Commands {
             default_value = "*"
         )]
         query: String,
-        #[arg(long, default_value_t = 25)]
+        #[arg(long, default_value_t = DEFAULT_SEARCH_LIMIT)]
         limit: u32,
     },
     #[command(
@@ -620,20 +621,22 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
                     scope: None,
                     group: String::new(),
                     prefix: String::new(),
-                    limit: search_request_limit(query.as_str(), limit),
+                    limit: search_request_limit(),
                 })
                 .await?
                 .into_inner();
 
             let mut matched = 0_u32;
+            let mut shown = 0_u32;
             for secret in response.secrets {
                 if !secret_matches_query(&secret, query.as_str()) {
                     continue;
                 }
-                if search_display_limit_reached(matched, limit) {
-                    break;
-                }
                 matched += 1;
+                if search_display_limit_reached(shown, limit) {
+                    continue;
+                }
+                shown += 1;
                 let scope_selector = secret.scope.as_ref();
                 let scope = secret
                     .scope
@@ -668,6 +671,8 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
 
             if matched == 0 {
                 println!("no matches");
+            } else if let Some(summary) = search_truncation_summary(shown, matched) {
+                println!("{summary}");
             } else {
                 print_kv("matches", matched);
             }
@@ -1867,16 +1872,20 @@ fn secret_matches_query(secret: &proto::SecretInfo, query: &str) -> bool {
         || group.contains(query)
 }
 
-fn search_request_limit(query: &str, display_limit: u32) -> u32 {
-    if query == "*" {
-        display_limit
-    } else {
-        0
-    }
+fn search_request_limit() -> u32 {
+    0
 }
 
 fn search_display_limit_reached(matched: u32, display_limit: u32) -> bool {
     display_limit > 0 && matched >= display_limit
+}
+
+fn search_truncation_summary(shown: u32, total: u32) -> Option<String> {
+    if total > 0 && shown < total {
+        Some(format!("showing {shown} of {total}"))
+    } else {
+        None
+    }
 }
 
 fn has_wildcards(query: &str) -> bool {
@@ -2305,12 +2314,8 @@ mod tests {
     }
 
     #[test]
-    fn search_request_limit_fetches_all_for_filtered_queries() {
-        assert_eq!(search_request_limit("*", 25), 25);
-        assert_eq!(search_request_limit("linear", 25), 0);
-        assert_eq!(search_request_limit("*linear*", 25), 0);
-        assert_eq!(search_request_limit("global/linear*", 25), 0);
-        assert_eq!(search_request_limit("linear", 0), 0);
+    fn search_request_limit_fetches_all_to_count_truncation() {
+        assert_eq!(search_request_limit(), 0);
     }
 
     #[test]
@@ -2318,6 +2323,25 @@ mod tests {
         assert!(!search_display_limit_reached(24, 25));
         assert!(search_display_limit_reached(25, 25));
         assert!(!search_display_limit_reached(25, 0));
+    }
+
+    #[test]
+    fn search_default_limit_is_50() {
+        let cli = Cli::try_parse_from(["hem", "ls"]).expect("parse cli");
+        let Commands::Search { limit, .. } = cli.command else {
+            panic!("expected search command");
+        };
+        assert_eq!(limit, 50);
+    }
+
+    #[test]
+    fn search_summary_reports_truncation_only_when_not_all_are_shown() {
+        assert_eq!(
+            search_truncation_summary(50, 75),
+            Some("showing 50 of 75".to_string())
+        );
+        assert_eq!(search_truncation_summary(75, 75), None);
+        assert_eq!(search_truncation_summary(0, 0), None);
     }
 
     #[test]
