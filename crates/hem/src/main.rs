@@ -1,6 +1,7 @@
 #![allow(clippy::large_enum_variant)]
 
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, HashMap},
     fs,
     io::{self, IsTerminal, Read, Write},
@@ -173,6 +174,8 @@ enum Commands {
         query: String,
         #[arg(long, default_value_t = DEFAULT_SEARCH_LIMIT)]
         limit: u32,
+        #[arg(long, help = "Split project results into project/<project> sections")]
+        group_projects: bool,
     },
     #[command(
         about = "Archive a secret to local JSON",
@@ -613,7 +616,11 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
                 return Ok(1);
             }
         }
-        Commands::Search { query, limit } => {
+        Commands::Search {
+            query,
+            limit,
+            group_projects,
+        } => {
             let query = normalize_query(query.as_str())?;
             let color_enabled = color_output_enabled();
             let response = client
@@ -626,55 +633,28 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
                 .await?
                 .into_inner();
 
-            let mut matched = 0_u32;
-            let mut shown = 0_u32;
-            for secret in response.secrets {
-                if !secret_matches_query(&secret, query.as_str()) {
-                    continue;
+            let results =
+                collect_search_results(response.secrets, query.as_str(), limit, group_projects);
+            for (index, section) in results.sections.iter().enumerate() {
+                if index > 0 {
+                    println!();
                 }
-                matched += 1;
-                if search_display_limit_reached(shown, limit) {
-                    continue;
-                }
-                shown += 1;
-                let scope_selector = secret.scope.as_ref();
-                let scope = secret
-                    .scope
-                    .as_ref()
-                    .map(format_scope)
-                    .unwrap_or_else(|| "unspecified".to_string());
-                let scope = colorize(
-                    color_enabled,
-                    scope.as_str(),
-                    scope_color_code(scope_selector),
+                println!(
+                    "{}",
+                    colorize(color_enabled, section.heading.as_str(), "1;34")
                 );
-                let group = if secret.group.trim().is_empty() {
-                    "-"
-                } else {
-                    secret.group.as_str()
-                };
-                let group = if group == "-" {
-                    colorize(color_enabled, group, "2")
-                } else {
-                    colorize(color_enabled, group, "33")
-                };
-                let name = colorize(color_enabled, secret.name.as_str(), "1;32");
-                let updated = colorize(color_enabled, secret.updated_at.as_str(), "2");
-                println!("{}/{} group={} updated={}", scope, name, group, updated);
-                if !secret.description.trim().is_empty() {
-                    println!(
-                        "  {}",
-                        colorize(color_enabled, secret.description.trim(), "2")
-                    );
+                for secret in &section.secrets {
+                    print_search_secret(secret, color_enabled);
                 }
             }
 
-            if matched == 0 {
+            if results.matched == 0 {
                 println!("no matches");
-            } else if let Some(summary) = search_truncation_summary(shown, matched) {
+            } else if let Some(summary) = search_truncation_summary(results.shown, results.matched)
+            {
                 println!("{summary}");
             } else {
-                print_kv("matches", matched);
+                print_kv("matches", results.matched);
             }
         }
         Commands::Archive { secret, output } => {
@@ -1872,6 +1852,125 @@ fn secret_matches_query(secret: &proto::SecretInfo, query: &str) -> bool {
         || group.contains(query)
 }
 
+#[derive(Debug)]
+struct SearchResults {
+    matched: u32,
+    shown: u32,
+    sections: Vec<SearchSection>,
+}
+
+#[derive(Debug)]
+struct SearchSection {
+    heading: String,
+    secrets: Vec<proto::SecretInfo>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SearchSortKey {
+    scope_rank: u8,
+    heading: String,
+    secret_ref: String,
+}
+
+impl Ord for SearchSortKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.scope_rank
+            .cmp(&other.scope_rank)
+            .then_with(|| self.heading.cmp(&other.heading))
+            .then_with(|| self.secret_ref.cmp(&other.secret_ref))
+    }
+}
+
+impl PartialOrd for SearchSortKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn collect_search_results(
+    secrets: Vec<proto::SecretInfo>,
+    query: &str,
+    display_limit: u32,
+    group_projects: bool,
+) -> SearchResults {
+    let mut matched: Vec<proto::SecretInfo> = secrets
+        .into_iter()
+        .filter(|secret| secret_matches_query(secret, query))
+        .collect();
+    matched.sort_by_key(|secret| search_sort_key(secret, group_projects));
+
+    let total = matched.len();
+    let shown = if search_display_limit_reached(total as u32, display_limit) {
+        display_limit as usize
+    } else {
+        total
+    };
+
+    let mut sections: Vec<SearchSection> = Vec::new();
+    for secret in matched.into_iter().take(shown) {
+        let heading = search_section_heading(&secret, group_projects);
+        if let Some(section) = sections
+            .last_mut()
+            .filter(|section| section.heading == heading)
+        {
+            section.secrets.push(secret);
+        } else {
+            sections.push(SearchSection {
+                heading,
+                secrets: vec![secret],
+            });
+        }
+    }
+
+    SearchResults {
+        matched: total as u32,
+        shown: shown as u32,
+        sections,
+    }
+}
+
+fn search_sort_key(secret: &proto::SecretInfo, group_projects: bool) -> SearchSortKey {
+    SearchSortKey {
+        scope_rank: search_scope_rank(secret),
+        heading: search_section_heading(secret, group_projects).to_ascii_lowercase(),
+        secret_ref: search_secret_ref(secret).to_ascii_lowercase(),
+    }
+}
+
+fn search_scope_rank(secret: &proto::SecretInfo) -> u8 {
+    let Some(scope) = secret.scope.as_ref() else {
+        return 3;
+    };
+    match SecretScope::try_from(scope.scope).unwrap_or(SecretScope::Unspecified) {
+        SecretScope::Global => 0,
+        SecretScope::Project => 1,
+        SecretScope::Identity => 2,
+        SecretScope::Unspecified => 3,
+    }
+}
+
+fn search_section_heading(secret: &proto::SecretInfo, group_projects: bool) -> String {
+    let Some(scope) = secret.scope.as_ref() else {
+        return "unspecified".to_string();
+    };
+    match SecretScope::try_from(scope.scope).unwrap_or(SecretScope::Unspecified) {
+        SecretScope::Global => "global".to_string(),
+        SecretScope::Project if group_projects => format!("project/{}", scope.project),
+        SecretScope::Project => "project".to_string(),
+        SecretScope::Identity => "identity".to_string(),
+        SecretScope::Unspecified => "unspecified".to_string(),
+    }
+}
+
+fn search_secret_ref(secret: &proto::SecretInfo) -> String {
+    let scope = secret
+        .scope
+        .as_ref()
+        .map(format_scope)
+        .unwrap_or_else(|| "unspecified".to_string());
+    format!("{scope}/{}", secret.name)
+}
+
 fn search_request_limit() -> u32 {
     0
 }
@@ -1979,6 +2078,39 @@ fn print_usage() {
     println!("  hem l 'project/*/openai-*'");
     println!("  hem ap");
     println!("  hem u");
+}
+
+fn print_search_secret(secret: &proto::SecretInfo, color_enabled: bool) {
+    let scope_selector = secret.scope.as_ref();
+    let scope = secret
+        .scope
+        .as_ref()
+        .map(format_scope)
+        .unwrap_or_else(|| "unspecified".to_string());
+    let scope = colorize(
+        color_enabled,
+        scope.as_str(),
+        scope_color_code(scope_selector),
+    );
+    let group = if secret.group.trim().is_empty() {
+        "-"
+    } else {
+        secret.group.as_str()
+    };
+    let group = if group == "-" {
+        colorize(color_enabled, group, "2")
+    } else {
+        colorize(color_enabled, group, "33")
+    };
+    let name = colorize(color_enabled, secret.name.as_str(), "1;32");
+    let updated = colorize(color_enabled, secret.updated_at.as_str(), "2");
+    println!("  {}/{} group={} updated={}", scope, name, group, updated);
+    if !secret.description.trim().is_empty() {
+        println!(
+            "    {}",
+            colorize(color_enabled, secret.description.trim(), "2")
+        );
+    }
 }
 
 fn print_kv(key: &str, value: impl std::fmt::Display) {
@@ -2345,6 +2477,67 @@ mod tests {
     }
 
     #[test]
+    fn search_group_projects_flag_is_parsed() {
+        let cli = Cli::try_parse_from(["hem", "ls", "--group-projects"]).expect("parse cli");
+        let Commands::Search { group_projects, .. } = cli.command else {
+            panic!("expected search command");
+        };
+        assert!(group_projects);
+    }
+
+    #[test]
+    fn search_results_group_top_level_scopes_and_sort_refs() {
+        let results = collect_search_results(
+            vec![
+                project_secret("zeta", "z-key"),
+                global_secret("beta"),
+                identity_secret("agent-b", "token"),
+                project_secret("alpha", "a-key"),
+                global_secret("alpha"),
+            ],
+            "*",
+            0,
+            false,
+        );
+
+        assert_eq!(results.matched, 5);
+        assert_eq!(results.shown, 5);
+        assert_search_sections(
+            &results,
+            &[
+                ("global", &["global/alpha", "global/beta"]),
+                ("project", &["project/alpha/a-key", "project/zeta/z-key"]),
+                ("identity", &["identity/agent-b/token"]),
+            ],
+        );
+    }
+
+    #[test]
+    fn search_results_can_group_each_project() {
+        let results = collect_search_results(
+            vec![
+                project_secret("zeta", "z-key"),
+                project_secret("alpha", "b-key"),
+                project_secret("alpha", "a-key"),
+            ],
+            "*",
+            0,
+            true,
+        );
+
+        assert_search_sections(
+            &results,
+            &[
+                (
+                    "project/alpha",
+                    &["project/alpha/a-key", "project/alpha/b-key"],
+                ),
+                ("project/zeta", &["project/zeta/z-key"]),
+            ],
+        );
+    }
+
+    #[test]
     fn normalize_query_rejects_empty() {
         let err = normalize_query("   ").expect_err("must reject empty");
         assert!(err.to_string().contains("query must not be empty"));
@@ -2627,5 +2820,76 @@ mod tests {
     #[test]
     fn colorize_disabled_returns_plain_text() {
         assert_eq!(colorize(false, "plain", "32"), "plain");
+    }
+
+    fn assert_search_sections(results: &SearchResults, expected: &[(&str, &[&str])]) {
+        let actual: Vec<(String, Vec<String>)> = results
+            .sections
+            .iter()
+            .map(|section| {
+                (
+                    section.heading.clone(),
+                    section.secrets.iter().map(search_secret_ref).collect(),
+                )
+            })
+            .collect();
+        let expected: Vec<(String, Vec<String>)> = expected
+            .iter()
+            .map(|(heading, refs)| {
+                (
+                    (*heading).to_string(),
+                    refs.iter().map(|value| (*value).to_string()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    fn global_secret(name: &str) -> proto::SecretInfo {
+        test_secret(
+            ScopeSelector {
+                scope: SecretScope::Global as i32,
+                project: String::new(),
+                identity_id: String::new(),
+            },
+            name,
+        )
+    }
+
+    fn project_secret(project: &str, name: &str) -> proto::SecretInfo {
+        test_secret(
+            ScopeSelector {
+                scope: SecretScope::Project as i32,
+                project: project.to_string(),
+                identity_id: String::new(),
+            },
+            name,
+        )
+    }
+
+    fn identity_secret(identity_id: &str, name: &str) -> proto::SecretInfo {
+        test_secret(
+            ScopeSelector {
+                scope: SecretScope::Identity as i32,
+                project: String::new(),
+                identity_id: identity_id.to_string(),
+            },
+            name,
+        )
+    }
+
+    fn test_secret(scope: ScopeSelector, name: &str) -> proto::SecretInfo {
+        proto::SecretInfo {
+            scope: Some(scope),
+            name: name.to_string(),
+            description: String::new(),
+            requires_approval: false,
+            group: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            created_by: String::new(),
+            last_accessed_at: String::new(),
+            last_accessed_by: String::new(),
+        }
     }
 }
