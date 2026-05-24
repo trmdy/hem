@@ -3,6 +3,8 @@ resolver = "2"
 members = [
   "crates/ida",
   "crates/idad",
+  "crates/veft-core",
+  "crates/veftd",
   "crates/due",
   "crates/dued",
   "crates/valhall-auth",
