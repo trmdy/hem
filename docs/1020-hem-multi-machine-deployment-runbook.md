@@ -130,3 +130,162 @@ hem --endpoint <endpoint> health
 HEM_DATA_DIR=<data-dir> hem cluster status
 HEM_DATA_DIR=<data-dir> hem cluster verify
 ```
+
+## Six-Node Acceptance Loop
+
+After every distributed Hem rebuild or cluster membership change, run the
+operator acceptance script from the Valhall repo root:
+
+```sh
+make hem-cluster-smoke
+```
+
+The script targets the current six-node cluster by default:
+
+- Mac
+- Alder (`alder.local`)
+- Birch (`birch`)
+- Cedar (`cedar`)
+- Dogwood (`192.0.2.85`)
+- Elm (`elm`)
+
+The acceptance loop intentionally takes full Hem data backups before it performs
+any verification that can write audit/read-receipt records. Backups are written
+under each node's `~/.valhall/backups/hem-cluster-smoke/<run-id>/<node>/` and
+include:
+
+- a full copy of the Hem data directory;
+- a consistent SQLite `.backup` of `distributed/ledger.sqlite3` when `sqlite3`
+  is available;
+- a manifest with mode bits and hashes for `master.key`, `node-identity.json`,
+  `cluster.toml`, and the ledger.
+
+The script never calls `hem rotate`, `hem cluster migrate`, `hem cluster fork`,
+or `hem cluster replay-fork`. It records `master.key` and `node-identity.json`
+hashes before and after the run and fails if either changed.
+
+The loop verifies:
+
+- `hem health`, `hem cluster health`, and `hem cluster verify` on every node;
+- identical `latest_position` and `latest_body_hash` across all nodes;
+- `healthy_peers=5`, `issues=0`, `sync_errors=0`, and no divergent peers;
+- identical `hem` and `hemd` binary hashes;
+- launchd has `io.valhall.hemd` loaded;
+- strict data-dir security via `hem cluster verify`;
+- a harmless smoke secret can be written, replicated, read from every node, and
+  produces `read.fulfilled` ledger receipts;
+- one-node stop/write/restart recovery converges without manual repair;
+- two-node stop/write/restart recovery when the configured quorum permits it;
+- `global/smoke-test-secret` can be read on every node without printing
+  plaintext, by comparing only bytes and SHA-256 hashes;
+- `hem cluster rewrap-values --dry-run` reports no remaining recipient rewrap
+  work (`values_rewrapped=0`, `operations_planned=0`,
+  `unsupported_records=0`).
+
+Useful narrower entry points:
+
+```sh
+make hem-cluster-health
+scripts/hem-cluster-smoke.sh smoke
+scripts/hem-cluster-smoke.sh real-secret
+```
+
+### macOS Local Network Privacy proxies
+
+On macOS 15.5+ and 26.x, Local Network Privacy can block daemon-owned LAN
+sockets even when SSH-launched tools can reach the same peer. The observed
+failure is a `peer connect failed ... No route to host` error from `hemd`, while
+`hem --endpoint http://<peer>:50091 health` and `/usr/bin/nc` succeed from the
+same host.
+
+`hemd` embeds `NSLocalNetworkUsageDescription`, but headless machines may still
+need either explicit Local Network approval or an operational bypass. For
+headless cluster nodes, install loopback peer proxies:
+
+```sh
+make hem-cluster-peer-proxies
+scripts/hem-cluster-peer-proxies.sh status
+```
+
+The proxy script defaults to Birch, Cedar, and Elm. It:
+
+- backs up each node's `cluster.toml`;
+- installs `/usr/bin/nc`-based LaunchAgents under
+  `~/Library/LaunchAgents/io.valhall.hem-peer-proxy.<peer>.plist`;
+- rewrites peer endpoints in `cluster.toml` to `http://127.0.0.1:<port>`;
+- writes proxy logs outside the Hem data directory under
+  `~/.valhall/system-daemons/logs/hem-peer-proxies/`;
+- restarts `io.valhall.hemd` and verifies local health;
+- never reads, writes, rotates, or replaces `master.key` or
+  `node-identity.json`.
+
+To remove the bypass and restore the previous peer endpoints:
+
+```sh
+scripts/hem-cluster-peer-proxies.sh restore
+```
+
+For custom machines, pass explicit node specs:
+
+```sh
+scripts/hem-cluster-smoke.sh acceptance \
+  --clear-nodes \
+  --node 'mac|local|~/.valhall/system-daemons/data/hem|http://127.0.0.1:50091' \
+  --node 'peer-a|peer-a.local|~/.valhall/system-daemons/data/hem|http://127.0.0.1:50091'
+```
+
+Each node spec is `name|host|data_dir|endpoint`; `host=local` runs commands on
+the current machine and any other host is reached through SSH.
+
+## Watchdog
+
+For recurring monitoring, run:
+
+```sh
+scripts/hem-cluster-watchdog.sh --interval 60
+```
+
+The watchdog delegates to `scripts/hem-cluster-smoke.sh watchdog-once` and
+alerts on non-zero cluster health, divergent peers, lagging peers, offline
+peers, permission failures, sync errors, and failed receipt probes.
+
+To verify read receipts continuously, point the watchdog at a low-risk smoke
+secret:
+
+```sh
+scripts/hem-cluster-watchdog.sh \
+  --interval 60 \
+  --receipt-ref global/hem-distribution-smoke-watchdog \
+  --receipt-key value
+```
+
+Set `HEM_CLUSTER_ALERT_CMD` to integrate with a local notification or paging
+command. The command receives `HEM_ALERT_MESSAGE`.
+
+## Troubleshooting: Previous Hash Mismatch
+
+If `hem cluster sync --once` fails with:
+
+```text
+ledger previous hash mismatch
+```
+
+stop running smoke, failure, and real-secret acceptance passes until the ledger
+convergence issue is resolved. This means more than one node appended to its
+local linear hash chain before the cluster had a shared next operation.
+
+For the current implementation, this is most likely to happen after reads from
+multiple nodes because every successful read appends a signed `read.fulfilled`
+operation. The acceptance script intentionally treats this as a hard failure
+because distributed Hem requires all retrieval receipts to converge.
+
+Immediate operator rules:
+
+- keep the fresh backups from the failed run;
+- do not run `hem cluster fork`, `hem cluster replay-fork`, migration, or key
+  rotation as an automatic repair;
+- keep `hemd` running if secrets must remain available, but avoid multi-node
+  write/read-receipt tests until the ledger model supports multi-writer
+  convergence or a single sequencer is configured;
+- fix the ledger convergence model first, then rerun `make hem-cluster-health`
+  and `make hem-cluster-smoke`.
