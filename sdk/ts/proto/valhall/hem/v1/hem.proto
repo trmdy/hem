@@ -10,6 +10,7 @@ service HemRuntime {
   rpc DeleteSecret(DeleteSecretRequest) returns (DeleteSecretResponse);
   rpc ListSecrets(ListSecretsRequest) returns (ListSecretsResponse);
   rpc GetSecrets(GetSecretsRequest) returns (GetSecretsResponse);
+  rpc ScanForSecrets(ScanForSecretsRequest) returns (ScanForSecretsResponse);
 
   // Groups
   rpc SetGroup(SetGroupRequest) returns (GroupInfo);
@@ -37,6 +38,18 @@ service HemRuntime {
 
   // Audit
   rpc GetAuditLog(GetAuditLogRequest) returns (GetAuditLogResponse);
+
+  // Peer replication
+  rpc PeerHello(PeerHelloRequest) returns (PeerHelloResponse);
+  rpc PeerApproveRead(PeerApproveReadRequest) returns (PeerApproveReadResponse);
+  rpc PeerApproveCollision(PeerApproveCollisionRequest) returns (PeerApproveCollisionResponse);
+  rpc PeerRouteMasterApproval(PeerRouteMasterApprovalRequest) returns (PeerRouteMasterApprovalResponse);
+  rpc PeerGetMasterApprovalStatus(PeerGetMasterApprovalStatusRequest) returns (PeerGetMasterApprovalStatusResponse);
+  rpc PeerConsumeMasterApprovalReceipt(PeerConsumeMasterApprovalReceiptRequest) returns (PeerConsumeMasterApprovalReceiptResponse);
+  rpc PeerListOperations(PeerListOperationsRequest) returns (PeerListOperationsResponse);
+  rpc PeerAckOperations(PeerAckOperationsRequest) returns (PeerAckOperationsResponse);
+  rpc PeerPushOperations(PeerPushOperationsRequest) returns (PeerPushOperationsResponse);
+  rpc PeerCosignCheckpoint(PeerCosignCheckpointRequest) returns (PeerCosignCheckpointResponse);
 
   // Admin
   rpc InitHem(InitHemRequest) returns (InitHemResponse);
@@ -206,6 +219,25 @@ message GetSecretsResponse {
   repeated SecretBatchResult results = 1;
 }
 
+message ScanForSecretsRequest {
+  string text = 1;
+  ScopeSelector scope = 2;
+  uint32 min_value_length = 3;
+}
+
+message ScanMatch {
+  string secret_ref = 1;
+  string key = 2;
+  uint32 offset = 3;
+}
+
+message ScanForSecretsResponse {
+  bool clean = 1;
+  repeated ScanMatch matches = 2;
+  uint32 scanned_length = 3;
+  uint32 secrets_checked = 4;
+}
+
 message GroupInfo {
   string name = 1;
   string description = 2;
@@ -343,6 +375,7 @@ message ApprovalRequestInfo {
   string resolved_by = 10;
   string resolve_message = 11;
   string action = 12;
+  string secret_version = 13;
 }
 
 message ListPendingApprovalsRequest {
@@ -392,6 +425,228 @@ message GetAuditLogRequest {
 
 message GetAuditLogResponse {
   repeated AuditEntry entries = 1;
+}
+
+message LedgerOperationBody {
+  string operation_id = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  int64 node_seq = 4;
+  string op_type = 5;
+  string payload_json = 6;
+  string created_at = 7;
+  string prev_hash_b64 = 8;
+}
+
+message LedgerOperationEnvelope {
+  LedgerOperationBody body = 1;
+  string body_hash_b64 = 2;
+  string signing_public_key_b64 = 3;
+  string signature_b64 = 4;
+  int64 position = 5;
+}
+
+message LedgerCheckpointBody {
+  string checkpoint_id = 1;
+  string cluster_id = 2;
+  int64 to_position = 3;
+  int64 operation_count = 4;
+  string merkle_root_b64 = 5;
+  string created_at = 6;
+}
+
+message LedgerCheckpoint {
+  LedgerCheckpointBody body = 1;
+  string body_hash_b64 = 2;
+  string signer_node_id = 3;
+  string signing_public_key_b64 = 4;
+  string signature_b64 = 5;
+}
+
+message LedgerCheckpointCosignatureBody {
+  string checkpoint_id = 1;
+  string checkpoint_body_hash_b64 = 2;
+  string signer_node_id = 3;
+  string signed_at = 4;
+}
+
+message LedgerCheckpointCosignature {
+  LedgerCheckpointCosignatureBody body = 1;
+  string signing_public_key_b64 = 2;
+  string signature_b64 = 3;
+}
+
+message PeerHelloRequest {
+  string cluster_id = 1;
+  string node_id = 2;
+  string public_key = 3;
+}
+
+message PeerHelloResponse {
+  bool accepted = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  int64 latest_position = 4;
+  string latest_body_hash_b64 = 5;
+}
+
+message PeerApproveReadRequest {
+  string cluster_id = 1;
+  string requester_node_id = 2;
+  string requester_public_key = 3;
+  string nonce = 4;
+  string secret_scope = 5;
+  string secret_name = 6;
+  string requester_actor = 7;
+  string token_id = 8;
+  string policy_decision = 9;
+  int64 requester_latest_position = 10;
+  string requester_latest_body_hash_b64 = 11;
+}
+
+message PeerApproveReadResponse {
+  bool accepted = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  int64 latest_position = 4;
+  string latest_body_hash_b64 = 5;
+  string statement_hash_b64 = 6;
+  string signing_public_key_b64 = 7;
+  string signature_b64 = 8;
+  string reason = 9;
+}
+
+message PeerApproveCollisionRequest {
+  string cluster_id = 1;
+  string requester_node_id = 2;
+  string requester_public_key = 3;
+  string nonce = 4;
+  string collision_id = 5;
+  string scope = 6;
+  string name = 7;
+  string key = 8;
+  string current_operation_id = 9;
+  string incoming_operation_id = 10;
+  int64 base_version_seq = 11;
+  int64 current_version_seq = 12;
+  string resolution = 13;
+  int64 requester_latest_position = 14;
+  string requester_latest_body_hash_b64 = 15;
+}
+
+message PeerApproveCollisionResponse {
+  bool accepted = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  int64 latest_position = 4;
+  string latest_body_hash_b64 = 5;
+  string statement_hash_b64 = 6;
+  string signing_public_key_b64 = 7;
+  string signature_b64 = 8;
+  string reason = 9;
+}
+
+message PeerRouteMasterApprovalRequest {
+  string cluster_id = 1;
+  string requester_node_id = 2;
+  string requester_public_key = 3;
+  ScopeSelector scope = 4;
+  string secret_name = 5;
+  string secret_version = 6;
+  string action = 7;
+  string requested_by = 8;
+  string reason = 9;
+  string default_reason = 10;
+}
+
+message PeerRouteMasterApprovalResponse {
+  bool accepted = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  ApprovalRequestInfo request = 4;
+  string reason = 5;
+}
+
+message PeerGetMasterApprovalStatusRequest {
+  string cluster_id = 1;
+  string requester_node_id = 2;
+  string requester_public_key = 3;
+  string request_id = 4;
+}
+
+message PeerGetMasterApprovalStatusResponse {
+  bool found = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  ApprovalRequestInfo request = 4;
+  string approval_receipt = 5;
+}
+
+message PeerConsumeMasterApprovalReceiptRequest {
+  string cluster_id = 1;
+  string requester_node_id = 2;
+  string requester_public_key = 3;
+  ScopeSelector scope = 4;
+  string secret_name = 5;
+  string secret_version = 6;
+  string action = 7;
+  string approval_receipt = 8;
+  string actor = 9;
+}
+
+message PeerConsumeMasterApprovalReceiptResponse {
+  bool consumed = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  string request_id = 4;
+}
+
+message PeerListOperationsRequest {
+  int64 after_position = 1;
+  uint32 limit = 2;
+  string peer_node_id = 3;
+  bool use_recorded_cursor = 4;
+}
+
+message PeerListOperationsResponse {
+  repeated LedgerOperationEnvelope operations = 1;
+  int64 latest_position = 2;
+  string latest_body_hash_b64 = 3;
+}
+
+message PeerPushOperationsRequest {
+  repeated LedgerOperationEnvelope operations = 1;
+}
+
+message PeerPushOperationsResponse {
+  uint32 accepted_count = 1;
+  int64 latest_position = 2;
+  string latest_body_hash_b64 = 3;
+}
+
+message PeerAckOperationsRequest {
+  string peer_node_id = 1;
+  int64 position = 2;
+  string body_hash_b64 = 3;
+}
+
+message PeerAckOperationsResponse {
+  bool recorded = 1;
+  int64 next_position = 2;
+}
+
+message PeerCosignCheckpointRequest {
+  string requester_node_id = 1;
+  string requester_public_key = 2;
+  LedgerCheckpoint checkpoint = 3;
+}
+
+message PeerCosignCheckpointResponse {
+  bool accepted = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  LedgerCheckpointCosignature cosignature = 4;
+  string reason = 5;
 }
 
 message InitHemRequest {

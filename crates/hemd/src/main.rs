@@ -2,26 +2,40 @@
 #![allow(clippy::large_enum_variant)]
 
 use std::{
+    collections::hash_map::DefaultHasher,
     collections::{HashMap, HashSet},
     fs,
+    hash::{Hash, Hasher},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use hem_core::{
-    authorize_admin, authorize_read,
+    authorize_admin, authorize_read, envelope_decrypt_for_node,
     model::{resolution_chain, ApprovalState as CoreApprovalState},
-    AuditEntry as CoreAuditEntry, DeleteApprovalRecord, DeleteApprovalStore,
-    GrantInfo as CoreGrantInfo, GroupInfo as CoreGroupInfo, HemError, HemStore,
-    ScopeResolutionContext, SecretInfo as CoreSecretInfo, SecretScope,
+    node_statement_hash_b64, peer_transport_auth_statement_bytes, verify_node_statement_signature,
+    AuditEntry as CoreAuditEntry, ClusterConfig, CollisionAgreementStatement, DeleteApprovalRecord,
+    DeleteApprovalStore, EnvelopeEncryptedValue, GrantInfo as CoreGrantInfo,
+    GroupInfo as CoreGroupInfo, HemError, HemStore, LedgerCheckpoint as CoreLedgerCheckpoint,
+    LedgerCheckpointBody as CoreLedgerCheckpointBody,
+    LedgerCheckpointCosignature as CoreLedgerCheckpointCosignature,
+    LedgerCheckpointCosignatureBody as CoreLedgerCheckpointCosignatureBody,
+    LedgerOperationBody as CoreLedgerOperationBody,
+    LedgerOperationEnvelope as CoreLedgerOperationEnvelope,
+    LedgerOperationInput as CoreLedgerOperationInput, NodeIdentity, NodeKeyRecipient, PeerConfig,
+    ScopeResolutionContext, SecretInfo as CoreSecretInfo, SecretPolicyTier, SecretScope,
     SecretWithValues as CoreSecretWithValues, SetSecretInput, TokenClaims, TokenType,
 };
 use serde::Serialize;
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{
+    metadata::MetadataMap,
+    transport::{Endpoint, Server},
+    Request, Response, Status,
+};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use valhall_events::topics;
@@ -34,6 +48,7 @@ pub mod proto {
 
 use proto::{
     get_secret_info_request, get_secret_request, get_secret_response,
+    hem_runtime_client::HemRuntimeClient,
     hem_runtime_server::{HemRuntime, HemRuntimeServer},
     secret_batch_request_item, secret_batch_result, AddToGroupRequest, ApprovalStatusResponse,
     DeleteSecretRequest, DeleteSecretResponse, ExportSecretsRequest, ExportSecretsResponse,
@@ -44,15 +59,24 @@ use proto::{
     IssueTokenResponse, ListActiveTokensRequest, ListActiveTokensResponse, ListGrantsRequest,
     ListGrantsResponse, ListGroupSecretsRequest, ListGroupSecretsResponse, ListGroupsRequest,
     ListGroupsResponse, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListSecretsRequest, ListSecretsResponse, RemoveFromGroupRequest, RemoveFromGroupResponse,
-    ResolveApprovalRequest, ResolveApprovalResponse, RevokeAccessRequest, RevokeAccessResponse,
-    RevokeTokenRequest, RevokeTokenResponse, RotateMasterKeyRequest, RotateMasterKeyResponse,
-    ScanForSecretsRequest, ScanForSecretsResponse, SecretInfo, SetGroupRequest, SetSecretRequest,
-    TokenInfo,
+    ListSecretsRequest, ListSecretsResponse, PeerAckOperationsRequest, PeerAckOperationsResponse,
+    PeerApproveCollisionRequest, PeerApproveCollisionResponse, PeerApproveReadRequest,
+    PeerApproveReadResponse, PeerConsumeMasterApprovalReceiptRequest,
+    PeerConsumeMasterApprovalReceiptResponse, PeerCosignCheckpointRequest,
+    PeerCosignCheckpointResponse, PeerGetMasterApprovalStatusRequest,
+    PeerGetMasterApprovalStatusResponse, PeerHelloRequest, PeerHelloResponse,
+    PeerListOperationsRequest, PeerListOperationsResponse, PeerPushOperationsRequest,
+    PeerPushOperationsResponse, PeerRouteMasterApprovalRequest, PeerRouteMasterApprovalResponse,
+    RemoveFromGroupRequest, RemoveFromGroupResponse, ResolveApprovalRequest,
+    ResolveApprovalResponse, RevokeAccessRequest, RevokeAccessResponse, RevokeTokenRequest,
+    RevokeTokenResponse, RotateMasterKeyRequest, RotateMasterKeyResponse, ScanForSecretsRequest,
+    ScanForSecretsResponse, SecretInfo, SetGroupRequest, SetSecretRequest, TokenInfo,
 };
 
 const DEFAULT_BIND: &str = "127.0.0.1:50091";
 const DEFAULT_HEM_SUBDIR: &str = ".valhall/hem";
+const CLUSTER_CONFIG_FILE: &str = "cluster.toml";
+const NODE_IDENTITY_FILE: &str = "node-identity.json";
 const DEFAULT_AGENT_TOKEN_TTL_SECS: u64 = 60 * 60;
 const DEFAULT_SERVICE_TOKEN_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const DEFAULT_OPERATOR_TOKEN_TTL_SECS: u64 = 365 * 24 * 60 * 60;
@@ -63,6 +87,28 @@ const APPROVAL_RECEIPT_METADATA_KEY: &str = "x-hem-approval-receipt";
 const DEFAULT_GET_APPROVAL_REASON: &str = "read requires approval";
 const DEFAULT_SET_APPROVAL_REASON: &str = "write requires approval";
 const DEFAULT_SCAN_MIN_VALUE_LENGTH: u32 = 8;
+const DEFAULT_CLUSTER_SYNC_INTERVAL_MS: u64 = 5_000;
+const DEFAULT_CLUSTER_SYNC_BATCH_LIMIT: u32 = 1_000;
+const DEFAULT_CLUSTER_SYNC_MAX_BACKOFF_MS: u64 = 30_000;
+const CLUSTER_SYNC_CONNECT_TIMEOUT_SECS: u64 = 3;
+const CLUSTER_SYNC_RPC_TIMEOUT_SECS: u64 = 10;
+const PEER_TRANSPORT_AUTH_CLUSTER_ID_METADATA_KEY: &str = "x-hem-peer-cluster-id";
+const PEER_TRANSPORT_AUTH_NODE_ID_METADATA_KEY: &str = "x-hem-peer-node-id";
+const PEER_TRANSPORT_AUTH_METHOD_METADATA_KEY: &str = "x-hem-peer-method";
+const PEER_TRANSPORT_AUTH_NONCE_METADATA_KEY: &str = "x-hem-peer-nonce";
+const PEER_TRANSPORT_AUTH_TIMESTAMP_METADATA_KEY: &str = "x-hem-peer-timestamp";
+const PEER_TRANSPORT_AUTH_SIGNATURE_METADATA_KEY: &str = "x-hem-peer-signature";
+const PEER_TRANSPORT_AUTH_MAX_SKEW_SECS: i64 = 5 * 60;
+const PEER_METHOD_APPROVE_COLLISION: &str = "PeerApproveCollision";
+const PEER_METHOD_APPROVE_READ: &str = "PeerApproveRead";
+const PEER_METHOD_CONSUME_MASTER_APPROVAL_RECEIPT: &str = "PeerConsumeMasterApprovalReceipt";
+const PEER_METHOD_COSIGN_CHECKPOINT: &str = "PeerCosignCheckpoint";
+const PEER_METHOD_GET_MASTER_APPROVAL_STATUS: &str = "PeerGetMasterApprovalStatus";
+const PEER_METHOD_HELLO: &str = "PeerHello";
+const PEER_METHOD_LIST_OPERATIONS: &str = "PeerListOperations";
+const PEER_METHOD_PUSH_OPERATIONS: &str = "PeerPushOperations";
+const PEER_METHOD_ACK_OPERATIONS: &str = "PeerAckOperations";
+const PEER_METHOD_ROUTE_MASTER_APPROVAL: &str = "PeerRouteMasterApproval";
 
 #[derive(Debug, Parser)]
 #[command(name = "hemd", about = "Valhall Hem daemon")]
@@ -88,20 +134,201 @@ struct HemRuntimeService {
     data_dir: PathBuf,
     approval_provider: Arc<dyn ApprovalProvider>,
     mesh: Option<Arc<Mesh>>,
+    cluster_runtime: ClusterRuntimeInfo,
+    peer_nonce_cache: Arc<Mutex<HashMap<String, i64>>>,
 }
 
 impl HemRuntimeService {
-    fn new(data_dir: PathBuf, mesh: Option<Arc<Mesh>>) -> Self {
+    fn new(
+        data_dir: PathBuf,
+        mesh: Option<Arc<Mesh>>,
+        cluster_runtime: ClusterRuntimeInfo,
+    ) -> Self {
         let approval_provider = Arc::new(LocalApprovalProvider::new(data_dir.clone()));
         Self {
             data_dir,
             approval_provider,
             mesh,
+            cluster_runtime,
+            peer_nonce_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     fn open_store(&self) -> Result<HemStore, Status> {
         HemStore::open(self.data_dir.as_path()).map_err(status_from_hem)
+    }
+
+    fn require_cluster_identity(&self) -> Result<(String, String), Status> {
+        if !self.cluster_runtime.enabled {
+            return Err(Status::failed_precondition("hem cluster is not enabled"));
+        }
+        let cluster_id = self
+            .cluster_runtime
+            .cluster_id
+            .clone()
+            .ok_or_else(|| Status::failed_precondition("hem cluster_id is unavailable"))?;
+        let node_id = self
+            .cluster_runtime
+            .node_id
+            .clone()
+            .ok_or_else(|| Status::failed_precondition("hem cluster node_id is unavailable"))?;
+        Ok((cluster_id, node_id))
+    }
+
+    fn require_master_approval_node(&self, node_id: &str) -> Result<(), Status> {
+        if self.cluster_runtime.master_node_id.as_deref() != Some(node_id) {
+            return Err(Status::failed_precondition(format!(
+                "local node {node_id} is not the cluster master approval node"
+            )));
+        }
+        Ok(())
+    }
+
+    fn require_configured_peer_requester(
+        &self,
+        request_cluster_id: &str,
+        requester_node_id: &str,
+        requester_public_key: &str,
+    ) -> Result<(), Status> {
+        validate_peer_request_subject("requester node_id", requester_node_id)?;
+        validate_peer_request_subject("requester public_key", requester_public_key)?;
+        let config = ClusterConfig::load(self.data_dir.join(CLUSTER_CONFIG_FILE).as_path())
+            .map_err(status_from_hem)?;
+        if config.cluster_id != request_cluster_id {
+            return Err(Status::permission_denied(format!(
+                "request cluster_id {request_cluster_id} does not match local cluster_id {}",
+                config.cluster_id
+            )));
+        }
+        let requester = config
+            .peers
+            .iter()
+            .find(|peer| peer.node_id == requester_node_id)
+            .ok_or_else(|| {
+                Status::permission_denied(format!(
+                    "requester node {requester_node_id} is not a configured cluster peer"
+                ))
+            })?;
+        if requester.public_key != requester_public_key {
+            return Err(Status::permission_denied(format!(
+                "requester public key mismatch for node {requester_node_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn verify_peer_transport_auth<T>(
+        &self,
+        request: &Request<T>,
+        method: &str,
+    ) -> Result<Option<PeerConfig>, Status> {
+        let config = ClusterConfig::load(self.data_dir.join(CLUSTER_CONFIG_FILE).as_path())
+            .map_err(status_from_hem)?;
+        if config.peers.is_empty() {
+            return Ok(None);
+        }
+
+        let metadata = request.metadata();
+        let cluster_id =
+            required_peer_metadata(metadata, PEER_TRANSPORT_AUTH_CLUSTER_ID_METADATA_KEY)?;
+        let node_id = required_peer_metadata(metadata, PEER_TRANSPORT_AUTH_NODE_ID_METADATA_KEY)?;
+        let signed_method =
+            required_peer_metadata(metadata, PEER_TRANSPORT_AUTH_METHOD_METADATA_KEY)?;
+        let nonce = required_peer_metadata(metadata, PEER_TRANSPORT_AUTH_NONCE_METADATA_KEY)?;
+        let timestamp =
+            required_peer_metadata(metadata, PEER_TRANSPORT_AUTH_TIMESTAMP_METADATA_KEY)?;
+        let signature =
+            required_peer_metadata(metadata, PEER_TRANSPORT_AUTH_SIGNATURE_METADATA_KEY)?;
+
+        validate_peer_request_subject("peer auth cluster_id", cluster_id)?;
+        validate_peer_request_subject("peer auth node_id", node_id)?;
+        validate_peer_request_subject("peer auth method", signed_method)?;
+        validate_peer_request_subject("peer auth nonce", nonce)?;
+        if cluster_id != config.cluster_id {
+            return Err(Status::unauthenticated(format!(
+                "peer auth cluster_id {cluster_id} does not match local cluster_id {}",
+                config.cluster_id
+            )));
+        }
+        if signed_method != method {
+            return Err(Status::unauthenticated(format!(
+                "peer auth method {signed_method} does not match rpc method {method}"
+            )));
+        }
+
+        let timestamp_unix = timestamp.parse::<i64>().map_err(|err| {
+            Status::unauthenticated(format!("peer auth timestamp is invalid: {err}"))
+        })?;
+        let now = Utc::now().timestamp();
+        if timestamp_unix < now - PEER_TRANSPORT_AUTH_MAX_SKEW_SECS
+            || timestamp_unix > now + PEER_TRANSPORT_AUTH_MAX_SKEW_SECS
+        {
+            return Err(Status::unauthenticated(
+                "peer auth timestamp is stale or from the future",
+            ));
+        }
+
+        let peer = config
+            .peers
+            .iter()
+            .find(|peer| peer.node_id == node_id)
+            .cloned()
+            .ok_or_else(|| {
+                Status::unauthenticated(format!(
+                    "peer auth node {node_id} is not a configured cluster peer"
+                ))
+            })?;
+        let statement_bytes = peer_transport_auth_statement_bytes(
+            cluster_id,
+            node_id,
+            signed_method,
+            nonce,
+            timestamp_unix,
+        )
+        .map_err(status_from_hem)?;
+        verify_node_statement_signature(
+            peer.public_key.as_str(),
+            statement_bytes.as_slice(),
+            signature,
+        )
+        .map_err(|err| Status::unauthenticated(format!("peer auth signature invalid: {err}")))?;
+
+        let nonce_key = format!("{cluster_id}\0{node_id}\0{signed_method}\0{nonce}");
+        let mut nonce_cache = self
+            .peer_nonce_cache
+            .lock()
+            .map_err(|_| Status::internal("peer auth nonce cache poisoned"))?;
+        let oldest_allowed = now - PEER_TRANSPORT_AUTH_MAX_SKEW_SECS;
+        nonce_cache.retain(|_, seen_timestamp| *seen_timestamp >= oldest_allowed);
+        if nonce_cache.contains_key(nonce_key.as_str()) {
+            return Err(Status::unauthenticated("replayed peer request nonce"));
+        }
+        nonce_cache.insert(nonce_key, timestamp_unix);
+
+        Ok(Some(peer))
+    }
+
+    fn require_authenticated_peer_subject(
+        &self,
+        authenticated_peer: Option<&PeerConfig>,
+        requester_node_id: &str,
+        requester_public_key: &str,
+    ) -> Result<(), Status> {
+        if let Some(peer) = authenticated_peer {
+            if requester_node_id != peer.node_id {
+                return Err(Status::unauthenticated(format!(
+                    "requester node_id {requester_node_id} does not match authenticated peer {}",
+                    peer.node_id
+                )));
+            }
+            if requester_public_key != peer.public_key {
+                return Err(Status::unauthenticated(format!(
+                    "requester public key mismatch for authenticated peer {}",
+                    peer.node_id
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn parse_secret_ref(
@@ -112,6 +339,128 @@ impl HemRuntimeService {
         let scope = parse_scope_selector_or_global(secret.scope)?;
         let name = parse_secret_name(secret.name.as_str())?;
         Ok((scope, name))
+    }
+
+    fn get_secret_with_distributed_fallback(
+        &self,
+        store: &HemStore,
+        scope: &SecretScope,
+        name: &str,
+        actor: Option<&str>,
+    ) -> Result<CoreSecretWithValues, Status> {
+        match store.get_secret(scope, name, actor) {
+            Ok(secret) => Ok(secret),
+            Err(HemError::SecretNotFound(_)) => {
+                self.get_distributed_secret_from_ledger(store, scope, name)
+            }
+            Err(err) => Err(status_from_hem(err)),
+        }
+    }
+
+    fn get_distributed_secret_from_ledger(
+        &self,
+        store: &HemStore,
+        scope: &SecretScope,
+        name: &str,
+    ) -> Result<CoreSecretWithValues, Status> {
+        if !self.cluster_runtime.enabled {
+            return Err(secret_not_found_status(scope, name));
+        }
+        let (cluster_id, node_id) = self.require_cluster_identity()?;
+        let identity = NodeIdentity::load(self.data_dir.join(NODE_IDENTITY_FILE).as_path())
+            .map_err(status_from_hem)?;
+        if identity.node_id != node_id {
+            return Err(Status::failed_precondition(format!(
+                "hem cluster node identity mismatch: runtime={} identity={}",
+                node_id, identity.node_id
+            )));
+        }
+        let private_key = identity.wrap_private_key_b64.as_deref().ok_or_else(|| {
+            Status::failed_precondition(format!(
+                "node {node_id} cannot decrypt distributed ledger secrets without a wrap private key"
+            ))
+        })?;
+        let ledger = store.ledger_store().map_err(status_from_hem)?;
+        ledger
+            .materialize_secret_metadata()
+            .map_err(status_from_hem)?;
+        ledger
+            .materialize_secret_value_versions()
+            .map_err(status_from_hem)?;
+
+        let scope = scope.clone();
+        let scope_label = scope_label(&scope);
+        let metadata = ledger
+            .get_materialized_secret_metadata(cluster_id.as_str(), scope_label.as_str(), name)
+            .map_err(status_from_hem)?
+            .ok_or_else(|| secret_not_found_status(&scope, name))?;
+        let versions = ledger
+            .list_latest_secret_value_versions(cluster_id.as_str(), scope_label.as_str(), name)
+            .map_err(status_from_hem)?;
+        let mut values = HashMap::new();
+        for version in versions {
+            let envelope: EnvelopeEncryptedValue =
+                serde_json::from_value(version.encrypted_value_json.clone()).map_err(|err| {
+                    Status::failed_precondition(format!(
+                        "distributed secret value {} is not node-envelope encrypted: {err}",
+                        version.key
+                    ))
+                })?;
+            let aad = format!("{}:{name}:{}", scope_label, version.key);
+            let plain =
+                envelope_decrypt_for_node(&envelope, aad.as_bytes(), node_id.as_str(), private_key)
+                    .map_err(status_from_hem)?;
+            values.insert(version.key, plain);
+        }
+
+        Ok(CoreSecretWithValues {
+            info: CoreSecretInfo {
+                scope,
+                name: metadata.name,
+                description: metadata.description,
+                requires_approval: metadata.requires_approval,
+                group: metadata.group,
+                created_at: metadata.updated_at,
+                updated_at: metadata.updated_at,
+                created_by: metadata.updated_by,
+                last_accessed_at: None,
+                last_accessed_by: None,
+            },
+            values,
+        })
+    }
+
+    fn resolve_secret_by_name(
+        &self,
+        store: &HemStore,
+        name: &str,
+        context: Option<proto::ScopeResolutionContext>,
+        actor: Option<&str>,
+        claims: Option<&TokenClaims>,
+    ) -> Result<CoreSecretWithValues, Status> {
+        let context = to_resolution_context(context);
+        let mut denied = false;
+        for scope in resolution_chain(&context) {
+            if let Some(claims) = claims {
+                let has_grant = self.has_explicit_read_grant(store, claims, &scope, name)?;
+                if authorize_read(claims, &scope, has_grant).is_err() {
+                    denied = true;
+                    continue;
+                }
+            }
+            match self.get_secret_with_distributed_fallback(store, &scope, name, actor) {
+                Ok(secret) => return Ok(secret),
+                Err(status) if status.code() == tonic::Code::NotFound => continue,
+                Err(status) => return Err(status),
+            }
+        }
+
+        if denied {
+            return Err(Status::permission_denied(format!(
+                "not authorized to read secret: {name}"
+            )));
+        }
+        Err(Status::not_found(format!("secret not found: {name}")))
     }
 
     fn resolve_lookup_secret(
@@ -130,13 +479,11 @@ impl HemRuntimeService {
                         self.has_explicit_read_grant(store, claims, &scope, name.as_str())?;
                     authorize_read(claims, &scope, has_grant).map_err(status_from_hem)?;
                 }
-                store
-                    .get_secret(&scope, name.as_str(), actor)
-                    .map_err(status_from_hem)
+                self.get_secret_with_distributed_fallback(store, &scope, name.as_str(), actor)
             }
             get_secret_request::Lookup::Name(name) => {
                 let name = parse_secret_name(name.as_str())?;
-                resolve_secret_by_name(store, name.as_str(), context, actor, claims)
+                self.resolve_secret_by_name(store, name.as_str(), context, actor, claims)
             }
         }
     }
@@ -239,6 +586,799 @@ impl HemRuntimeService {
         }
     }
 
+    fn append_signed_read_receipts(
+        &self,
+        store: &HemStore,
+        caller: &CallerPrincipal,
+        secret: &CoreSecretWithValues,
+        policy_decision: &str,
+        approval_reference: &str,
+    ) -> Result<(), Status> {
+        if !self.cluster_runtime.enabled {
+            return Ok(());
+        }
+        let (cluster_id, node_id) = self.require_cluster_identity()?;
+        let identity_path = self.data_dir.join(NODE_IDENTITY_FILE);
+        let identity = NodeIdentity::load(identity_path.as_path()).map_err(status_from_hem)?;
+        if identity.node_id != node_id {
+            return Err(Status::failed_precondition(format!(
+                "hem cluster node identity mismatch: runtime={} identity={}",
+                node_id, identity.node_id
+            )));
+        }
+        let ledger = store.ledger_store().map_err(status_from_hem)?;
+        let keys = sorted_secret_keys(secret.values.keys());
+        let receipt_id = format!(
+            "hrr_{}",
+            valhall_config::ids::generate_entropy_prefixed_ulid()
+        );
+        let requested_payload = serde_json::json!({
+            "receipt_id": receipt_id,
+            "requester": caller.actor.as_str(),
+            "token_id": caller.token_id.as_str(),
+            "secret_scope": scope_label(&secret.info.scope),
+            "secret_name": secret.info.name.as_str(),
+            "keys": keys,
+            "version": secret.info.updated_at.to_rfc3339(),
+            "policy_decision": policy_decision,
+            "approval_reference": approval_reference,
+            "plaintext_included": false,
+        });
+        let requested = self.append_cluster_ledger_operation(
+            &ledger,
+            &identity,
+            cluster_id.as_str(),
+            "read.requested",
+            requested_payload,
+        )?;
+        let fulfilled_payload = serde_json::json!({
+            "receipt_id": receipt_id,
+            "read_request_operation_id": requested.operation_id,
+            "requester": caller.actor.as_str(),
+            "token_id": caller.token_id.as_str(),
+            "secret_scope": scope_label(&secret.info.scope),
+            "secret_name": secret.info.name.as_str(),
+            "keys": sorted_secret_keys(secret.values.keys()),
+            "version": secret.info.updated_at.to_rfc3339(),
+            "policy_decision": policy_decision,
+            "approval_reference": approval_reference,
+            "released_key_count": secret.values.len(),
+            "plaintext_included": false,
+        });
+        self.append_cluster_ledger_operation(
+            &ledger,
+            &identity,
+            cluster_id.as_str(),
+            "read.fulfilled",
+            fulfilled_payload,
+        )?;
+        Ok(())
+    }
+
+    fn append_cluster_ledger_operation(
+        &self,
+        ledger: &hem_core::LedgerStore,
+        identity: &NodeIdentity,
+        cluster_id: &str,
+        op_type: &str,
+        payload_json: serde_json::Value,
+    ) -> Result<hem_core::LedgerOperation, Status> {
+        let input = CoreLedgerOperationInput {
+            operation_id: format!(
+                "hop_{}",
+                valhall_config::ids::generate_entropy_prefixed_ulid()
+            ),
+            cluster_id: cluster_id.to_string(),
+            node_id: identity.node_id.clone(),
+            node_seq: ledger
+                .node_high_watermark(identity.node_id.as_str())
+                .map_err(status_from_hem)?
+                + 1,
+            op_type: op_type.to_string(),
+            payload_json,
+            created_at: Utc::now(),
+        };
+        let envelope = ledger.sign_next(identity, input).map_err(status_from_hem)?;
+        ledger.append_signed(&envelope).map_err(status_from_hem)
+    }
+
+    fn cluster_ledger_context(&self) -> Result<Option<(String, NodeIdentity)>, Status> {
+        if !self.cluster_runtime.enabled {
+            return Ok(None);
+        }
+        let cluster_id = self
+            .cluster_runtime
+            .cluster_id
+            .clone()
+            .ok_or_else(|| Status::failed_precondition("hem cluster_id is unavailable"))?;
+        let expected_node_id = self
+            .cluster_runtime
+            .node_id
+            .as_deref()
+            .ok_or_else(|| Status::failed_precondition("hem cluster node_id is unavailable"))?;
+        let identity = NodeIdentity::load(self.data_dir.join(NODE_IDENTITY_FILE).as_path())
+            .map_err(status_from_hem)?;
+        if identity.node_id != expected_node_id {
+            return Err(Status::failed_precondition(format!(
+                "node identity mismatch: runtime node_id={} identity node_id={}",
+                expected_node_id, identity.node_id
+            )));
+        }
+        Ok(Some((cluster_id, identity)))
+    }
+
+    fn append_cluster_secret_set(
+        &self,
+        store: &HemStore,
+        scope: &SecretScope,
+        name: &str,
+        actor: &str,
+    ) -> Result<(), Status> {
+        let Some((cluster_id, identity)) = self.cluster_ledger_context()? else {
+            return Ok(());
+        };
+        let recipients = self.cluster_key_recipients(&identity)?;
+        store
+            .append_secret_set_to_ledger_for_nodes(
+                cluster_id.as_str(),
+                &identity,
+                scope,
+                name,
+                actor,
+                recipients.as_slice(),
+            )
+            .map_err(status_from_hem)?;
+        Ok(())
+    }
+
+    fn cluster_key_recipients(
+        &self,
+        identity: &NodeIdentity,
+    ) -> Result<Vec<NodeKeyRecipient>, Status> {
+        let mut recipients = Vec::new();
+        if let Some(public_key) = identity.wrap_public_key_b64.as_ref() {
+            recipients.push(NodeKeyRecipient {
+                node_id: identity.node_id.clone(),
+                public_key_b64: public_key.clone(),
+            });
+        }
+        let config = ClusterConfig::load(self.data_dir.join(CLUSTER_CONFIG_FILE).as_path())
+            .map_err(status_from_hem)?;
+        for peer in &config.peers {
+            if let Some(public_key) = peer.wrap_public_key.as_ref() {
+                recipients.push(NodeKeyRecipient {
+                    node_id: peer.node_id.clone(),
+                    public_key_b64: public_key.clone(),
+                });
+            }
+        }
+        Ok(recipients)
+    }
+
+    fn append_cluster_secret_metadata(
+        &self,
+        store: &HemStore,
+        scope: &SecretScope,
+        name: &str,
+        actor: &str,
+    ) -> Result<(), Status> {
+        let Some((cluster_id, identity)) = self.cluster_ledger_context()? else {
+            return Ok(());
+        };
+        store
+            .append_secret_metadata_to_ledger(cluster_id.as_str(), &identity, scope, name, actor)
+            .map_err(status_from_hem)?;
+        Ok(())
+    }
+
+    fn append_cluster_event_operation(
+        &self,
+        store: &HemStore,
+        op_type: &str,
+        payload_json: serde_json::Value,
+    ) -> Result<(), Status> {
+        let Some((cluster_id, identity)) = self.cluster_ledger_context()? else {
+            return Ok(());
+        };
+        store
+            .append_signed_ledger_operation(
+                cluster_id.as_str(),
+                &identity,
+                op_type,
+                payload_json,
+                Utc::now(),
+            )
+            .map_err(status_from_hem)?;
+        Ok(())
+    }
+
+    async fn enforce_read_policy(
+        &self,
+        store: &HemStore,
+        caller: &CallerPrincipal,
+        secret: &CoreSecretWithValues,
+        approval_reference: &str,
+    ) -> Result<ReadPolicyOutcome, Status> {
+        if !self.cluster_runtime.enabled {
+            return Ok(ReadPolicyOutcome {
+                decision: if secret.info.requires_approval {
+                    if caller.is_operator {
+                        "operator".to_string()
+                    } else {
+                        "approval_receipt".to_string()
+                    }
+                } else {
+                    "authorized".to_string()
+                },
+                reference: approval_reference.to_string(),
+            });
+        }
+
+        let policy_store = store.policy_store().map_err(status_from_hem)?;
+        let tier = policy_store
+            .effective_policy(&secret.info.scope, secret.info.name.as_str())
+            .map_err(status_from_hem)?;
+        if !self.cluster_runtime.force_offline {
+            if tier == SecretPolicyTier::PeerQuorum {
+                let reference = self
+                    .require_peer_quorum(store, caller, secret, approval_reference)
+                    .await?;
+                return Ok(ReadPolicyOutcome {
+                    decision: tier.as_str().to_string(),
+                    reference,
+                });
+            }
+            return Ok(ReadPolicyOutcome {
+                decision: tier.as_str().to_string(),
+                reference: approval_reference.to_string(),
+            });
+        }
+
+        match tier {
+            SecretPolicyTier::LocalLogged => Ok(ReadPolicyOutcome {
+                decision: SecretPolicyTier::LocalLogged.as_str().to_string(),
+                reference: approval_reference.to_string(),
+            }),
+            SecretPolicyTier::OfflineLease => {
+                let node_id =
+                    self.cluster_runtime.node_id.as_deref().ok_or_else(|| {
+                        Status::failed_precondition("hem cluster node_id missing")
+                    })?;
+                let lease = policy_store
+                    .consume_offline_lease(
+                        &secret.info.scope,
+                        secret.info.name.as_str(),
+                        caller.actor.as_str(),
+                        node_id,
+                    )
+                    .map_err(|err| Status::failed_precondition(err.to_string()))?;
+                Ok(ReadPolicyOutcome {
+                    decision: SecretPolicyTier::OfflineLease.as_str().to_string(),
+                    reference: lease.lease_id,
+                })
+            }
+            SecretPolicyTier::PeerQuorum => Err(Status::failed_precondition(
+                "secret read policy peer_quorum requires reachable peer quorum",
+            )),
+            SecretPolicyTier::MasterBiometric => Err(Status::failed_precondition(
+                "secret read policy master_biometric requires reachable master approval",
+            )),
+        }
+    }
+
+    async fn require_peer_quorum(
+        &self,
+        store: &HemStore,
+        caller: &CallerPrincipal,
+        secret: &CoreSecretWithValues,
+        upstream_approval_reference: &str,
+    ) -> Result<String, Status> {
+        let Some((cluster_id, identity)) = self.cluster_ledger_context()? else {
+            return Err(Status::failed_precondition("hem cluster is not enabled"));
+        };
+        let config = ClusterConfig::load(self.data_dir.join(CLUSTER_CONFIG_FILE).as_path())
+            .map_err(status_from_hem)?;
+        if config.cluster_id != cluster_id || config.node_id != identity.node_id {
+            return Err(Status::failed_precondition(
+                "hem cluster config does not match active node identity",
+            ));
+        }
+
+        let required_peer_acks = usize::from(config.quorum.saturating_sub(1));
+        let ledger = store.ledger_store().map_err(status_from_hem)?;
+        let requester_latest_position = ledger.latest_position().map_err(status_from_hem)?;
+        let requester_latest_body_hash_b64 = ledger
+            .latest_body_hash()
+            .map_err(status_from_hem)?
+            .unwrap_or_default();
+        let nonce = format!(
+            "hqn_{}",
+            valhall_config::ids::generate_entropy_prefixed_ulid()
+        );
+        let secret_scope = scope_label(&secret.info.scope);
+        let secret_name = secret.info.name.as_str();
+        let policy_decision = SecretPolicyTier::PeerQuorum.as_str();
+        let mut accepted = Vec::new();
+        let mut failures = Vec::new();
+
+        for peer in &config.peers {
+            match self
+                .request_peer_read_approval(
+                    &cluster_id,
+                    &identity,
+                    peer,
+                    nonce.as_str(),
+                    secret_scope.as_str(),
+                    secret_name,
+                    caller,
+                    policy_decision,
+                    requester_latest_position,
+                    requester_latest_body_hash_b64.as_str(),
+                )
+                .await
+            {
+                Ok(evidence) => {
+                    accepted.push(evidence);
+                    if accepted.len() >= required_peer_acks {
+                        break;
+                    }
+                }
+                Err(err) => failures.push(serde_json::json!({
+                    "peer_node_id": peer.node_id.as_str(),
+                    "endpoint": peer.endpoint.as_str(),
+                    "error": err,
+                })),
+            }
+        }
+
+        if accepted.len() < required_peer_acks {
+            let first_failure = failures
+                .first()
+                .and_then(|failure| failure.get("error"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            warn!(
+                cluster_id = %cluster_id,
+                node_id = %identity.node_id,
+                secret_scope = %secret_scope,
+                secret_name = %secret_name,
+                required_peer_acks,
+                accepted = accepted.len(),
+                configured_peers = config.peers.len(),
+                failures = failures.len(),
+                first_failure,
+                "hem peer quorum approval failed"
+            );
+            return Err(Status::failed_precondition(format!(
+                "secret read policy peer_quorum requires {required_peer_acks} reachable peer approval(s); accepted={} configured_peers={} failures={} first_failure={}",
+                accepted.len(),
+                config.peers.len(),
+                failures.len(),
+                first_failure
+            )));
+        }
+
+        info!(
+            cluster_id = %cluster_id,
+            node_id = %identity.node_id,
+            secret_scope = %secret_scope,
+            secret_name = %secret_name,
+            required_peer_acks,
+            accepted = accepted.len(),
+            configured_peers = config.peers.len(),
+            requester_latest_position,
+            "hem peer quorum approval satisfied"
+        );
+
+        let evidence = serde_json::json!({
+            "kind": "peer_quorum_v1",
+            "cluster_id": cluster_id,
+            "requester_node_id": identity.node_id,
+            "secret_scope": secret_scope,
+            "secret_name": secret_name,
+            "requester_actor": caller.actor.as_str(),
+            "token_id": caller.token_id.as_str(),
+            "policy_decision": policy_decision,
+            "upstream_approval_reference": upstream_approval_reference,
+            "required_cluster_quorum": config.quorum,
+            "required_peer_acks": required_peer_acks,
+            "nonce": nonce,
+            "requester_latest_position": requester_latest_position,
+            "requester_latest_body_hash_b64": requester_latest_body_hash_b64,
+            "accepted": accepted,
+            "failures": failures,
+        });
+        serde_json::to_string(&evidence).map_err(|err| {
+            Status::internal(format!("peer quorum evidence serialize failed: {err}"))
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn request_peer_read_approval(
+        &self,
+        cluster_id: &str,
+        identity: &NodeIdentity,
+        peer: &PeerConfig,
+        nonce: &str,
+        secret_scope: &str,
+        secret_name: &str,
+        caller: &CallerPrincipal,
+        policy_decision: &str,
+        requester_latest_position: i64,
+        requester_latest_body_hash_b64: &str,
+    ) -> Result<serde_json::Value, String> {
+        let channel = Endpoint::from_shared(peer.endpoint.clone())
+            .map_err(|err| format!("invalid peer endpoint: {err}"))?
+            .connect_timeout(Duration::from_secs(CLUSTER_SYNC_CONNECT_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(CLUSTER_SYNC_RPC_TIMEOUT_SECS))
+            .connect()
+            .await
+            .map_err(|err| format!("connect failed: {err}"))?;
+        let mut client = HemRuntimeClient::new(channel);
+        let response = client
+            .peer_approve_read(
+                signed_peer_transport_request(
+                    PeerApproveReadRequest {
+                        cluster_id: cluster_id.to_string(),
+                        requester_node_id: identity.node_id.clone(),
+                        requester_public_key: identity.signing_public_key_b64.clone(),
+                        nonce: nonce.to_string(),
+                        secret_scope: secret_scope.to_string(),
+                        secret_name: secret_name.to_string(),
+                        requester_actor: caller.actor.clone(),
+                        token_id: caller.token_id.clone(),
+                        policy_decision: policy_decision.to_string(),
+                        requester_latest_position,
+                        requester_latest_body_hash_b64: requester_latest_body_hash_b64.to_string(),
+                    },
+                    identity,
+                    cluster_id,
+                    PEER_METHOD_APPROVE_READ,
+                )
+                .map_err(|err| format!("peer auth sign failed: {err}"))?,
+            )
+            .await
+            .map_err(|err| format!("approval rpc failed: {err}"))?
+            .into_inner();
+
+        if !response.accepted {
+            let reason = if response.reason.trim().is_empty() {
+                "-"
+            } else {
+                response.reason.as_str()
+            };
+            return Err(format!("peer rejected read approval: {}", reason));
+        }
+        if response.cluster_id != cluster_id {
+            return Err(format!(
+                "cluster_id mismatch expected={} actual={}",
+                cluster_id, response.cluster_id
+            ));
+        }
+        if response.node_id != peer.node_id {
+            return Err(format!(
+                "node_id mismatch expected={} actual={}",
+                peer.node_id, response.node_id
+            ));
+        }
+        if response.signing_public_key_b64 != peer.public_key {
+            return Err("signing public key mismatch".to_string());
+        }
+
+        let statement = PeerReadQuorumStatement {
+            version: "hem-peer-read-quorum-v1",
+            cluster_id,
+            requester_node_id: identity.node_id.as_str(),
+            approver_node_id: response.node_id.as_str(),
+            nonce,
+            secret_scope,
+            secret_name,
+            requester_actor: caller.actor.as_str(),
+            token_id: caller.token_id.as_str(),
+            policy_decision,
+            requester_latest_position,
+            requester_latest_body_hash_b64,
+            approver_latest_position: response.latest_position,
+            approver_latest_body_hash_b64: response.latest_body_hash_b64.as_str(),
+        };
+        let statement_bytes = serde_json::to_vec(&statement)
+            .map_err(|err| format!("statement serialize failed: {err}"))?;
+        let expected_hash = node_statement_hash_b64(statement_bytes.as_slice());
+        if response.statement_hash_b64 != expected_hash {
+            return Err(format!(
+                "statement hash mismatch expected={} actual={}",
+                expected_hash, response.statement_hash_b64
+            ));
+        }
+        verify_node_statement_signature(
+            peer.public_key.as_str(),
+            statement_bytes.as_slice(),
+            response.signature_b64.as_str(),
+        )
+        .map_err(|err| err.to_string())?;
+
+        let statement_json = serde_json::to_value(&statement)
+            .map_err(|err| format!("statement evidence serialize failed: {err}"))?;
+        Ok(serde_json::json!({
+            "peer_node_id": response.node_id,
+            "endpoint": peer.endpoint.as_str(),
+            "latest_position": response.latest_position,
+            "latest_body_hash_b64": response.latest_body_hash_b64,
+            "statement_hash_b64": response.statement_hash_b64,
+            "signing_public_key_b64": response.signing_public_key_b64,
+            "signature_b64": response.signature_b64,
+            "statement": statement_json,
+        }))
+    }
+
+    fn requires_remote_master_approval(
+        &self,
+        store: &HemStore,
+        secret: &CoreSecretWithValues,
+    ) -> Result<bool, Status> {
+        if !self.cluster_runtime.enabled
+            || self.cluster_runtime.force_offline
+            || self.cluster_runtime.is_master_node()
+        {
+            return Ok(false);
+        }
+        let policy = store
+            .policy_store()
+            .map_err(status_from_hem)?
+            .effective_policy(&secret.info.scope, secret.info.name.as_str())
+            .map_err(status_from_hem)?;
+        Ok(policy == SecretPolicyTier::MasterBiometric)
+    }
+
+    fn remote_master_peer(&self) -> Result<(String, NodeIdentity, PeerConfig), Status> {
+        let Some((cluster_id, identity)) = self.cluster_ledger_context()? else {
+            return Err(Status::failed_precondition("hem cluster is not enabled"));
+        };
+        let config = ClusterConfig::load(self.data_dir.join(CLUSTER_CONFIG_FILE).as_path())
+            .map_err(status_from_hem)?;
+        let master_node_id = config
+            .master_node_id
+            .as_deref()
+            .ok_or_else(|| Status::failed_precondition("hem cluster master_node_id missing"))?;
+        if master_node_id == identity.node_id {
+            return Err(Status::failed_precondition(
+                "local node is the master approval node",
+            ));
+        }
+        let peer = config
+            .peers
+            .iter()
+            .find(|peer| peer.node_id == master_node_id)
+            .cloned()
+            .ok_or_else(|| {
+                Status::failed_precondition(format!(
+                    "master node {master_node_id} is not configured as a peer"
+                ))
+            })?;
+        Ok((cluster_id, identity, peer))
+    }
+
+    async fn connect_cluster_peer(
+        &self,
+        peer: &PeerConfig,
+    ) -> Result<HemRuntimeClient<tonic::transport::Channel>, Status> {
+        let channel = Endpoint::from_shared(peer.endpoint.clone())
+            .map_err(|err| Status::invalid_argument(format!("invalid peer endpoint: {err}")))?
+            .connect_timeout(Duration::from_secs(CLUSTER_SYNC_CONNECT_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(CLUSTER_SYNC_RPC_TIMEOUT_SECS))
+            .connect()
+            .await
+            .map_err(|err| Status::unavailable(format!("peer connect failed: {err}")))?;
+        Ok(HemRuntimeClient::new(channel))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn route_remote_master_approval(
+        &self,
+        peer: &PeerConfig,
+        cluster_id: &str,
+        identity: &NodeIdentity,
+        secret: &CoreSecretWithValues,
+        secret_version: &str,
+        caller: &CallerPrincipal,
+        reason: &str,
+    ) -> Result<proto::ApprovalRequestInfo, Status> {
+        let mut client = self.connect_cluster_peer(peer).await?;
+        let response = client
+            .peer_route_master_approval(
+                signed_peer_transport_request(
+                    PeerRouteMasterApprovalRequest {
+                        cluster_id: cluster_id.to_string(),
+                        requester_node_id: identity.node_id.clone(),
+                        requester_public_key: identity.signing_public_key_b64.clone(),
+                        scope: Some(to_proto_secret_scope_selector(&secret.info.scope)),
+                        secret_name: secret.info.name.clone(),
+                        secret_version: secret_version.to_string(),
+                        action: "get_secret".to_string(),
+                        requested_by: caller.actor.clone(),
+                        reason: reason.to_string(),
+                        default_reason: DEFAULT_GET_APPROVAL_REASON.to_string(),
+                    },
+                    identity,
+                    cluster_id,
+                    PEER_METHOD_ROUTE_MASTER_APPROVAL,
+                )
+                .map_err(status_from_hem)?,
+            )
+            .await?
+            .into_inner();
+        if !response.accepted {
+            return Err(Status::failed_precondition(format!(
+                "master approval rejected: {}",
+                response.reason
+            )));
+        }
+        self.validate_master_peer_response(
+            peer,
+            cluster_id,
+            response.cluster_id.as_str(),
+            response.node_id.as_str(),
+        )?;
+        response
+            .request
+            .ok_or_else(|| Status::internal("master approval response missing request"))
+    }
+
+    async fn get_remote_master_approval_status(
+        &self,
+        peer: &PeerConfig,
+        cluster_id: &str,
+        identity: &NodeIdentity,
+        request_id: &str,
+    ) -> Result<RemoteMasterApprovalStatus, Status> {
+        let mut client = self.connect_cluster_peer(peer).await?;
+        let response = client
+            .peer_get_master_approval_status(
+                signed_peer_transport_request(
+                    PeerGetMasterApprovalStatusRequest {
+                        cluster_id: cluster_id.to_string(),
+                        requester_node_id: identity.node_id.clone(),
+                        requester_public_key: identity.signing_public_key_b64.clone(),
+                        request_id: request_id.to_string(),
+                    },
+                    identity,
+                    cluster_id,
+                    PEER_METHOD_GET_MASTER_APPROVAL_STATUS,
+                )
+                .map_err(status_from_hem)?,
+            )
+            .await?
+            .into_inner();
+        if !response.found {
+            return Err(Status::not_found(format!(
+                "master approval request not found: {request_id}"
+            )));
+        }
+        self.validate_master_peer_response(
+            peer,
+            cluster_id,
+            response.cluster_id.as_str(),
+            response.node_id.as_str(),
+        )?;
+        let request = response
+            .request
+            .ok_or_else(|| Status::internal("master approval status missing request"))?;
+        let state = proto::ApprovalState::try_from(request.state)
+            .map_err(|_| Status::internal("invalid approval state from master"))?;
+        Ok(RemoteMasterApprovalStatus {
+            request_id: request.request_id,
+            state: proto_approval_state_to_core(state),
+            resolve_message: request.resolve_message,
+            approval_receipt: response.approval_receipt,
+        })
+    }
+
+    async fn wait_for_remote_master_approval(
+        &self,
+        peer: &PeerConfig,
+        cluster_id: &str,
+        identity: &NodeIdentity,
+        request_id: &str,
+        timeout_ms: u64,
+    ) -> Result<RemoteMasterApprovalStatus, Status> {
+        let timeout_ms = if timeout_ms == 0 {
+            DEFAULT_APPROVAL_WAIT_TIMEOUT_MS
+        } else {
+            timeout_ms
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let status = self
+                .get_remote_master_approval_status(peer, cluster_id, identity, request_id)
+                .await?;
+            if !matches!(status.state, CoreApprovalState::Pending) {
+                return Ok(status);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Status::deadline_exceeded(format!(
+                    "master approval wait timed out: request_id={request_id}"
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(APPROVAL_WAIT_POLL_INTERVAL_MS)).await;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn consume_remote_master_approval_receipt(
+        &self,
+        peer: &PeerConfig,
+        cluster_id: &str,
+        identity: &NodeIdentity,
+        scope: &SecretScope,
+        secret_name: &str,
+        secret_version: &str,
+        action: &str,
+        receipt: &str,
+        actor: &str,
+    ) -> Result<String, Status> {
+        let mut client = self.connect_cluster_peer(peer).await?;
+        let response = client
+            .peer_consume_master_approval_receipt(
+                signed_peer_transport_request(
+                    PeerConsumeMasterApprovalReceiptRequest {
+                        cluster_id: cluster_id.to_string(),
+                        requester_node_id: identity.node_id.clone(),
+                        requester_public_key: identity.signing_public_key_b64.clone(),
+                        scope: Some(to_proto_secret_scope_selector(scope)),
+                        secret_name: secret_name.to_string(),
+                        secret_version: secret_version.to_string(),
+                        action: action.to_string(),
+                        approval_receipt: receipt.to_string(),
+                        actor: actor.to_string(),
+                    },
+                    identity,
+                    cluster_id,
+                    PEER_METHOD_CONSUME_MASTER_APPROVAL_RECEIPT,
+                )
+                .map_err(status_from_hem)?,
+            )
+            .await?
+            .into_inner();
+        if !response.consumed {
+            return Err(Status::failed_precondition(
+                "master approval receipt was not consumed",
+            ));
+        }
+        self.validate_master_peer_response(
+            peer,
+            cluster_id,
+            response.cluster_id.as_str(),
+            response.node_id.as_str(),
+        )?;
+        Ok(response.request_id)
+    }
+
+    fn validate_master_peer_response(
+        &self,
+        peer: &PeerConfig,
+        cluster_id: &str,
+        response_cluster_id: &str,
+        response_node_id: &str,
+    ) -> Result<(), Status> {
+        if response_cluster_id != cluster_id {
+            return Err(Status::failed_precondition(format!(
+                "master cluster_id mismatch expected={cluster_id} actual={response_cluster_id}"
+            )));
+        }
+        if response_node_id != peer.node_id {
+            return Err(Status::failed_precondition(format!(
+                "master node_id mismatch expected={} actual={response_node_id}",
+                peer.node_id
+            )));
+        }
+        if self.cluster_runtime.cluster_id.as_deref() != Some(cluster_id) {
+            return Err(Status::failed_precondition(
+                "local cluster runtime changed during master approval routing",
+            ));
+        }
+        Ok(())
+    }
+
     async fn emit_event_payload(&self, topic: &str, payload: impl Serialize) {
         let Some(mesh) = &self.mesh else {
             return;
@@ -305,11 +1445,55 @@ struct ScanMatchRecord {
     offset: u32,
 }
 
+#[derive(Debug, Clone)]
+struct ReadPolicyOutcome {
+    decision: String,
+    reference: String,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteMasterApprovalStatus {
+    request_id: String,
+    state: CoreApprovalState,
+    resolve_message: String,
+    approval_receipt: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PeerReadQuorumStatement<'a> {
+    version: &'static str,
+    cluster_id: &'a str,
+    requester_node_id: &'a str,
+    approver_node_id: &'a str,
+    nonce: &'a str,
+    secret_scope: &'a str,
+    secret_name: &'a str,
+    requester_actor: &'a str,
+    token_id: &'a str,
+    policy_decision: &'a str,
+    requester_latest_position: i64,
+    requester_latest_body_hash_b64: &'a str,
+    approver_latest_position: i64,
+    approver_latest_body_hash_b64: &'a str,
+}
+
 trait ApprovalProvider: Send + Sync + std::fmt::Debug {
     fn request_action(
         &self,
         secret_scope: SecretScope,
         secret_name: String,
+        action: &str,
+        requested_by: &str,
+        reason: &str,
+        default_reason: &str,
+    ) -> Result<DeleteApprovalRecord, HemError>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn request_action_for_version(
+        &self,
+        secret_scope: SecretScope,
+        secret_name: String,
+        secret_version: Option<&str>,
         action: &str,
         requested_by: &str,
         reason: &str,
@@ -330,6 +1514,16 @@ trait ApprovalProvider: Send + Sync + std::fmt::Debug {
         &self,
         secret_scope: &SecretScope,
         secret_name: &str,
+        action: &str,
+        receipt: &str,
+        actor: &str,
+    ) -> Result<String, HemError>;
+
+    fn consume_receipt_for_version(
+        &self,
+        secret_scope: &SecretScope,
+        secret_name: &str,
+        secret_version: Option<&str>,
         action: &str,
         receipt: &str,
         actor: &str,
@@ -373,6 +1567,28 @@ impl ApprovalProvider for LocalApprovalProvider {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn request_action_for_version(
+        &self,
+        secret_scope: SecretScope,
+        secret_name: String,
+        secret_version: Option<&str>,
+        action: &str,
+        requested_by: &str,
+        reason: &str,
+        default_reason: &str,
+    ) -> Result<DeleteApprovalRecord, HemError> {
+        self.open_store()?.request_action_for_version(
+            secret_scope,
+            secret_name,
+            secret_version,
+            action,
+            requested_by,
+            reason,
+            default_reason,
+        )
+    }
+
     fn list_pending(&self, limit: usize) -> Result<Vec<DeleteApprovalRecord>, HemError> {
         self.open_store()?.list_pending(limit)
     }
@@ -398,6 +1614,25 @@ impl ApprovalProvider for LocalApprovalProvider {
     ) -> Result<String, HemError> {
         self.open_store()?
             .consume_receipt(secret_scope, secret_name, action, receipt, actor)
+    }
+
+    fn consume_receipt_for_version(
+        &self,
+        secret_scope: &SecretScope,
+        secret_name: &str,
+        secret_version: Option<&str>,
+        action: &str,
+        receipt: &str,
+        actor: &str,
+    ) -> Result<String, HemError> {
+        self.open_store()?.consume_receipt_for_version(
+            secret_scope,
+            secret_name,
+            secret_version,
+            action,
+            receipt,
+            actor,
+        )
     }
 
     fn get_request(&self, request_id: &str) -> Result<DeleteApprovalRecord, HemError> {
@@ -440,7 +1675,7 @@ impl HemRuntime for HemRuntimeService {
                         scope.clone(),
                         name.clone(),
                         "set_secret",
-                        caller.token_id.as_str(),
+                        caller.actor.as_str(),
                         set_reason.as_str(),
                         DEFAULT_SET_APPROVAL_REASON,
                     )
@@ -460,7 +1695,7 @@ impl HemRuntime for HemRuntimeService {
                         "action": "set_secret",
                         "secret_scope": scope_label(&scope),
                         "secret_name": name.as_str(),
-                        "requested_by": caller.token_id.as_str(),
+                        "requested_by": caller.actor.as_str(),
                     }),
                 )
                 .await;
@@ -502,6 +1737,7 @@ impl HemRuntime for HemRuntimeService {
         };
 
         let info = store.set_secret(input).map_err(status_from_hem)?;
+        self.append_cluster_secret_set(&store, &scope, name.as_str(), caller.actor.as_str())?;
         self.audit(
             &store,
             Some(&caller),
@@ -535,6 +1771,7 @@ impl HemRuntime for HemRuntimeService {
         let approval_receipt = normalize_optional_string(req.approval_receipt)
             .or(metadata_approval_receipt)
             .unwrap_or_default();
+        let mut approval_reference = String::new();
 
         let mut secret = self.resolve_lookup_secret(
             &store,
@@ -552,7 +1789,7 @@ impl HemRuntime for HemRuntimeService {
                         secret.info.scope.clone(),
                         secret.info.name.clone(),
                         "get_secret",
-                        caller.token_id.as_str(),
+                        caller.actor.as_str(),
                         approval_reason.as_str(),
                         DEFAULT_GET_APPROVAL_REASON,
                     )
@@ -573,7 +1810,7 @@ impl HemRuntime for HemRuntimeService {
                         "action": "get_secret",
                         "secret_scope": scope_label(&secret.info.scope),
                         "secret_name": secret.info.name.as_str(),
-                        "requested_by": caller.token_id.as_str(),
+                        "requested_by": caller.actor.as_str(),
                     }),
                 )
                 .await;
@@ -615,6 +1852,7 @@ impl HemRuntime for HemRuntimeService {
                             .as_deref()
                             .ok_or_else(|| Status::failed_precondition("approval receipt missing"))?
                             .to_string();
+                        approval_reference = receipt.clone();
                         self.approval_provider
                             .consume_receipt(
                                 &secret.info.scope,
@@ -670,6 +1908,158 @@ impl HemRuntime for HemRuntimeService {
                         caller.actor.as_str(),
                     )
                     .map_err(status_from_hem)?;
+                approval_reference = approval_receipt.clone();
+            }
+        }
+
+        if self.requires_remote_master_approval(&store, &secret)? {
+            let secret_version = secret.info.updated_at.to_rfc3339();
+            let (cluster_id, identity, master_peer) = self.remote_master_peer()?;
+            if approval_receipt.trim().is_empty() {
+                let pending = self
+                    .route_remote_master_approval(
+                        &master_peer,
+                        cluster_id.as_str(),
+                        &identity,
+                        &secret,
+                        secret_version.as_str(),
+                        &caller,
+                        approval_reason.as_str(),
+                    )
+                    .await?;
+                let request_id = pending.request_id.clone();
+                self.audit(
+                    &store,
+                    Some(&caller),
+                    "get_secret",
+                    Some((&secret.info.scope, secret.info.name.as_str())),
+                    "pending_master_approval",
+                    format!(
+                        "request_id={request_id} master_node_id={}",
+                        self.cluster_runtime.master_node_id.as_deref().unwrap_or("")
+                    )
+                    .as_str(),
+                );
+                self.emit_event_payload(
+                    topics::HEM_APPROVAL_REQUESTED,
+                    serde_json::json!({
+                        "request_id": request_id.as_str(),
+                        "action": "get_secret",
+                        "secret_scope": scope_label(&secret.info.scope),
+                        "secret_name": secret.info.name.as_str(),
+                        "requested_by": caller.actor.as_str(),
+                        "routed_to": self.cluster_runtime.master_node_id.as_deref().unwrap_or(""),
+                    }),
+                )
+                .await;
+                if req.async_read {
+                    return Ok(Response::new(GetSecretResponse {
+                        result: Some(get_secret_response::Result::Pending(
+                            proto::PendingApproval {
+                                request_id,
+                                state: proto::ApprovalState::Pending as i32,
+                                message: "secret read requires master approval".to_string(),
+                            },
+                        )),
+                    }));
+                }
+
+                let resolved = match self
+                    .wait_for_remote_master_approval(
+                        &master_peer,
+                        cluster_id.as_str(),
+                        &identity,
+                        request_id.as_str(),
+                        req.wait_timeout_ms,
+                    )
+                    .await
+                {
+                    Ok(record) => record,
+                    Err(err) => {
+                        self.audit(
+                            &store,
+                            Some(&caller),
+                            "get_secret",
+                            Some((&secret.info.scope, secret.info.name.as_str())),
+                            "master_approval_wait_timeout",
+                            format!("request_id={request_id}").as_str(),
+                        );
+                        return Err(err);
+                    }
+                };
+
+                match resolved.state {
+                    CoreApprovalState::Approved => {
+                        if resolved.approval_receipt.trim().is_empty() {
+                            return Err(Status::failed_precondition(
+                                "master approval receipt missing",
+                            ));
+                        }
+                        self.consume_remote_master_approval_receipt(
+                            &master_peer,
+                            cluster_id.as_str(),
+                            &identity,
+                            &secret.info.scope,
+                            secret.info.name.as_str(),
+                            secret_version.as_str(),
+                            "get_secret",
+                            resolved.approval_receipt.as_str(),
+                            caller.actor.as_str(),
+                        )
+                        .await?;
+                        approval_reference = resolved.approval_receipt;
+                    }
+                    CoreApprovalState::Denied => {
+                        self.audit(
+                            &store,
+                            Some(&caller),
+                            "get_secret",
+                            Some((&secret.info.scope, secret.info.name.as_str())),
+                            "master_approval_denied",
+                            format!("request_id={}", resolved.request_id).as_str(),
+                        );
+                        return Err(Status::permission_denied(format!(
+                            "master approval denied: request_id={} message={}",
+                            resolved.request_id, resolved.resolve_message
+                        )));
+                    }
+                    CoreApprovalState::TimedOut => {
+                        self.audit(
+                            &store,
+                            Some(&caller),
+                            "get_secret",
+                            Some((&secret.info.scope, secret.info.name.as_str())),
+                            "master_approval_timed_out",
+                            format!("request_id={}", resolved.request_id).as_str(),
+                        );
+                        return Err(Status::deadline_exceeded(format!(
+                            "master approval timed out: request_id={}",
+                            resolved.request_id
+                        )));
+                    }
+                    CoreApprovalState::Pending => {
+                        return Err(Status::deadline_exceeded(format!(
+                            "master approval wait timed out: request_id={}",
+                            request_id,
+                        )));
+                    }
+                }
+            }
+
+            if !approval_receipt.trim().is_empty() {
+                self.consume_remote_master_approval_receipt(
+                    &master_peer,
+                    cluster_id.as_str(),
+                    &identity,
+                    &secret.info.scope,
+                    secret.info.name.as_str(),
+                    secret_version.as_str(),
+                    "get_secret",
+                    approval_receipt.as_str(),
+                    caller.actor.as_str(),
+                )
+                .await?;
+                approval_reference = approval_receipt.clone();
             }
         }
 
@@ -680,6 +2070,17 @@ impl HemRuntime for HemRuntimeService {
                 })?;
             secret.values = HashMap::from([(key, value)]);
         }
+
+        let policy = self
+            .enforce_read_policy(&store, &caller, &secret, approval_reference.as_str())
+            .await?;
+        self.append_signed_read_receipts(
+            &store,
+            &caller,
+            &secret,
+            policy.decision.as_str(),
+            policy.reference.as_str(),
+        )?;
 
         self.audit(
             &store,
@@ -755,6 +2156,18 @@ impl HemRuntime for HemRuntimeService {
             let deleted = store
                 .delete_secret(&scope, name.as_str())
                 .map_err(status_from_hem)?;
+            if deleted {
+                self.append_cluster_event_operation(
+                    &store,
+                    "secret.deleted",
+                    serde_json::json!({
+                        "scope": scope_label(&scope),
+                        "name": name.as_str(),
+                        "actor": actor.as_str(),
+                        "approval_request_id": request_id.as_str(),
+                    }),
+                )?;
+            }
             self.audit(
                 &store,
                 Some(&caller),
@@ -787,7 +2200,7 @@ impl HemRuntime for HemRuntimeService {
                 scope.clone(),
                 name.clone(),
                 "delete_secret",
-                caller.token_id.as_str(),
+                caller.actor.as_str(),
                 reason.as_str(),
                 "delete requested",
             )
@@ -892,7 +2305,7 @@ impl HemRuntime for HemRuntimeService {
                                     secret.info.scope.clone(),
                                     secret.info.name.clone(),
                                     "get_secret",
-                                    caller.token_id.as_str(),
+                                    caller.actor.as_str(),
                                     approval_reason.as_str(),
                                     DEFAULT_GET_APPROVAL_REASON,
                                 )
@@ -905,7 +2318,7 @@ impl HemRuntime for HemRuntimeService {
                                     "action": "get_secret",
                                     "secret_scope": scope_label(&secret.info.scope),
                                     "secret_name": secret.info.name.as_str(),
-                                    "requested_by": caller.token_id.as_str(),
+                                    "requested_by": caller.actor.as_str(),
                                 }),
                             )
                             .await;
@@ -939,6 +2352,18 @@ impl HemRuntime for HemRuntimeService {
                                                     caller.actor.as_str(),
                                                 )
                                                 .map_err(status_from_hem)?;
+                                            let policy = self
+                                                .enforce_read_policy(
+                                                    &store, &caller, &secret, receipt,
+                                                )
+                                                .await?;
+                                            self.append_signed_read_receipts(
+                                                &store,
+                                                &caller,
+                                                &secret,
+                                                policy.decision.as_str(),
+                                                policy.reference.as_str(),
+                                            )?;
                                             secret_batch_result::Result::Secret(
                                                 to_proto_secret_with_values(secret),
                                             )
@@ -984,9 +2409,34 @@ impl HemRuntime for HemRuntimeService {
                                     caller.actor.as_str(),
                                 )
                                 .map_err(status_from_hem)?;
+                            let policy = self
+                                .enforce_read_policy(
+                                    &store,
+                                    &caller,
+                                    &secret,
+                                    approval_receipt.as_str(),
+                                )
+                                .await?;
+                            self.append_signed_read_receipts(
+                                &store,
+                                &caller,
+                                &secret,
+                                policy.decision.as_str(),
+                                policy.reference.as_str(),
+                            )?;
                             secret_batch_result::Result::Secret(to_proto_secret_with_values(secret))
                         }
                     } else {
+                        let policy = self
+                            .enforce_read_policy(&store, &caller, &secret, "")
+                            .await?;
+                        self.append_signed_read_receipts(
+                            &store,
+                            &caller,
+                            &secret,
+                            policy.decision.as_str(),
+                            policy.reference.as_str(),
+                        )?;
                         secret_batch_result::Result::Secret(to_proto_secret_with_values(secret))
                     }
                 }
@@ -1107,6 +2557,17 @@ impl HemRuntime for HemRuntimeService {
         let info = groups
             .set_group(name.as_str(), req.description.as_str())
             .map_err(status_from_hem)?;
+        self.append_cluster_event_operation(
+            &store,
+            "group.set",
+            serde_json::json!({
+                "name": info.name.as_str(),
+                "description": info.description.as_str(),
+                "created_at": info.created_at.to_rfc3339(),
+                "updated_at": info.updated_at.to_rfc3339(),
+                "actor": caller.actor.as_str(),
+            }),
+        )?;
         Ok(Response::new(to_proto_group_info(info)))
     }
 
@@ -1126,13 +2587,31 @@ impl HemRuntime for HemRuntimeService {
             .map_err(status_from_hem)?;
 
         let groups = store.group_store().map_err(status_from_hem)?;
+        let mut group_created = false;
         let info = match groups.get_group(group.as_str()) {
             Ok(info) => info,
-            Err(HemError::GroupNotFound(_)) => groups
-                .set_group(group.as_str(), "")
-                .map_err(status_from_hem)?,
+            Err(HemError::GroupNotFound(_)) => {
+                group_created = true;
+                groups
+                    .set_group(group.as_str(), "")
+                    .map_err(status_from_hem)?
+            }
             Err(err) => return Err(status_from_hem(err)),
         };
+        if group_created {
+            self.append_cluster_event_operation(
+                &store,
+                "group.set",
+                serde_json::json!({
+                    "name": info.name.as_str(),
+                    "description": info.description.as_str(),
+                    "created_at": info.created_at.to_rfc3339(),
+                    "updated_at": info.updated_at.to_rfc3339(),
+                    "actor": caller.actor.as_str(),
+                }),
+            )?;
+        }
+        self.append_cluster_secret_metadata(&store, &scope, name.as_str(), caller.actor.as_str())?;
 
         Ok(Response::new(to_proto_group_info(info)))
     }
@@ -1150,6 +2629,7 @@ impl HemRuntime for HemRuntimeService {
         store
             .set_secret_group(&scope, name.as_str(), None)
             .map_err(status_from_hem)?;
+        self.append_cluster_secret_metadata(&store, &scope, name.as_str(), caller.actor.as_str())?;
 
         Ok(Response::new(RemoveFromGroupResponse { updated: true }))
     }
@@ -1397,6 +2877,19 @@ impl HemRuntime for HemRuntimeService {
                 caller.actor.as_str(),
             )
             .map_err(status_from_hem)?;
+        self.append_cluster_event_operation(
+            &store,
+            "grant.access",
+            serde_json::json!({
+                "scope": scope_label(&secret_scope),
+                "name": secret_name.as_str(),
+                "grantee_scope": format_scope(&grantee_scope),
+                "grantee_id": grantee_id.as_str(),
+                "created_at": grant.created_at.to_rfc3339(),
+                "created_by": grant.created_by.as_str(),
+                "actor": caller.actor.as_str(),
+            }),
+        )?;
         self.audit(
             &store,
             Some(&caller),
@@ -1435,6 +2928,19 @@ impl HemRuntime for HemRuntimeService {
                 grantee_id.as_str(),
             )
             .map_err(status_from_hem)?;
+        if revoked {
+            self.append_cluster_event_operation(
+                &store,
+                "grant.revoked",
+                serde_json::json!({
+                    "scope": scope_label(&secret_scope),
+                    "name": secret_name.as_str(),
+                    "grantee_scope": format_scope(&grantee_scope),
+                    "grantee_id": grantee_id.as_str(),
+                    "actor": caller.actor.as_str(),
+                }),
+            )?;
+        }
         self.audit(
             &store,
             Some(&caller),
@@ -1642,6 +3148,631 @@ impl HemRuntime for HemRuntimeService {
         }))
     }
 
+    async fn peer_hello(
+        &self,
+        request: Request<PeerHelloRequest>,
+    ) -> Result<Response<PeerHelloResponse>, Status> {
+        let (cluster_id, node_id) = self.require_cluster_identity()?;
+        let authenticated_peer = self.verify_peer_transport_auth(&request, PEER_METHOD_HELLO)?;
+        let req = request.into_inner();
+        validate_peer_request_subject("peer node_id", req.node_id.as_str())?;
+        validate_peer_request_subject("peer public_key", req.public_key.as_str())?;
+        self.require_authenticated_peer_subject(
+            authenticated_peer.as_ref(),
+            req.node_id.as_str(),
+            req.public_key.as_str(),
+        )?;
+        if req.cluster_id != cluster_id {
+            return Err(Status::permission_denied(format!(
+                "peer cluster_id {} does not match local cluster_id {}",
+                req.cluster_id, cluster_id
+            )));
+        }
+
+        let store = self.open_store()?;
+        let ledger = store.ledger_store().map_err(status_from_hem)?;
+        Ok(Response::new(PeerHelloResponse {
+            accepted: true,
+            cluster_id,
+            node_id,
+            latest_position: ledger.latest_position().map_err(status_from_hem)?,
+            latest_body_hash_b64: ledger
+                .latest_body_hash()
+                .map_err(status_from_hem)?
+                .unwrap_or_default(),
+        }))
+    }
+
+    async fn peer_approve_read(
+        &self,
+        request: Request<PeerApproveReadRequest>,
+    ) -> Result<Response<PeerApproveReadResponse>, Status> {
+        let (cluster_id, node_id) = self.require_cluster_identity()?;
+        let authenticated_peer =
+            self.verify_peer_transport_auth(&request, PEER_METHOD_APPROVE_READ)?;
+        let req = request.into_inner();
+        validate_peer_request_subject("requester node_id", req.requester_node_id.as_str())?;
+        validate_peer_request_subject("requester public_key", req.requester_public_key.as_str())?;
+        self.require_authenticated_peer_subject(
+            authenticated_peer.as_ref(),
+            req.requester_node_id.as_str(),
+            req.requester_public_key.as_str(),
+        )?;
+        validate_peer_request_subject("quorum nonce", req.nonce.as_str())?;
+        validate_peer_request_subject("secret scope", req.secret_scope.as_str())?;
+        validate_peer_request_subject("secret name", req.secret_name.as_str())?;
+        validate_peer_request_subject("requester actor", req.requester_actor.as_str())?;
+        validate_peer_request_subject("token id", req.token_id.as_str())?;
+        if req.requester_latest_position < 0 {
+            return Err(Status::invalid_argument(
+                "requester_latest_position must not be negative",
+            ));
+        }
+        if req.cluster_id != cluster_id {
+            return Err(Status::permission_denied(format!(
+                "peer cluster_id {} does not match local cluster_id {}",
+                req.cluster_id, cluster_id
+            )));
+        }
+        if req.policy_decision != SecretPolicyTier::PeerQuorum.as_str() {
+            return Err(Status::invalid_argument(
+                "peer read approval only supports peer_quorum policy decisions",
+            ));
+        }
+
+        let config = ClusterConfig::load(self.data_dir.join(CLUSTER_CONFIG_FILE).as_path())
+            .map_err(status_from_hem)?;
+        let requester = config
+            .peers
+            .iter()
+            .find(|peer| peer.node_id == req.requester_node_id)
+            .ok_or_else(|| {
+                Status::permission_denied(format!(
+                    "requester node {} is not a configured cluster peer",
+                    req.requester_node_id
+                ))
+            })?;
+        if requester.public_key != req.requester_public_key {
+            return Err(Status::permission_denied(format!(
+                "requester public key mismatch for node {}",
+                req.requester_node_id
+            )));
+        }
+
+        let identity = NodeIdentity::load(self.data_dir.join(NODE_IDENTITY_FILE).as_path())
+            .map_err(status_from_hem)?;
+        if identity.node_id != node_id {
+            return Err(Status::failed_precondition(format!(
+                "hem cluster node identity mismatch: runtime={} identity={}",
+                node_id, identity.node_id
+            )));
+        }
+
+        let store = self.open_store()?;
+        let ledger = store.ledger_store().map_err(status_from_hem)?;
+        let latest_position = ledger.latest_position().map_err(status_from_hem)?;
+        let latest_body_hash_b64 = ledger
+            .latest_body_hash()
+            .map_err(status_from_hem)?
+            .unwrap_or_default();
+        let statement = PeerReadQuorumStatement {
+            version: "hem-peer-read-quorum-v1",
+            cluster_id: cluster_id.as_str(),
+            requester_node_id: req.requester_node_id.as_str(),
+            approver_node_id: node_id.as_str(),
+            nonce: req.nonce.as_str(),
+            secret_scope: req.secret_scope.as_str(),
+            secret_name: req.secret_name.as_str(),
+            requester_actor: req.requester_actor.as_str(),
+            token_id: req.token_id.as_str(),
+            policy_decision: req.policy_decision.as_str(),
+            requester_latest_position: req.requester_latest_position,
+            requester_latest_body_hash_b64: req.requester_latest_body_hash_b64.as_str(),
+            approver_latest_position: latest_position,
+            approver_latest_body_hash_b64: latest_body_hash_b64.as_str(),
+        };
+        let statement_bytes = serde_json::to_vec(&statement).map_err(|err| {
+            Status::internal(format!(
+                "peer read approval statement serialize failed: {err}"
+            ))
+        })?;
+        let statement_hash_b64 = node_statement_hash_b64(statement_bytes.as_slice());
+        let signature_b64 = identity
+            .sign_statement(statement_bytes.as_slice())
+            .map_err(status_from_hem)?;
+
+        Ok(Response::new(PeerApproveReadResponse {
+            accepted: true,
+            cluster_id,
+            node_id,
+            latest_position,
+            latest_body_hash_b64,
+            statement_hash_b64,
+            signing_public_key_b64: identity.signing_public_key_b64,
+            signature_b64,
+            reason: String::new(),
+        }))
+    }
+
+    async fn peer_approve_collision(
+        &self,
+        request: Request<PeerApproveCollisionRequest>,
+    ) -> Result<Response<PeerApproveCollisionResponse>, Status> {
+        let (cluster_id, node_id) = self.require_cluster_identity()?;
+        let authenticated_peer =
+            self.verify_peer_transport_auth(&request, PEER_METHOD_APPROVE_COLLISION)?;
+        let req = request.into_inner();
+        validate_peer_request_subject("requester node_id", req.requester_node_id.as_str())?;
+        validate_peer_request_subject("requester public_key", req.requester_public_key.as_str())?;
+        self.require_authenticated_peer_subject(
+            authenticated_peer.as_ref(),
+            req.requester_node_id.as_str(),
+            req.requester_public_key.as_str(),
+        )?;
+        validate_peer_request_subject("quorum nonce", req.nonce.as_str())?;
+        validate_peer_request_subject("collision id", req.collision_id.as_str())?;
+        validate_peer_request_subject("scope", req.scope.as_str())?;
+        validate_peer_request_subject("name", req.name.as_str())?;
+        validate_peer_request_subject("key", req.key.as_str())?;
+        validate_peer_request_subject("current operation id", req.current_operation_id.as_str())?;
+        validate_peer_request_subject("incoming operation id", req.incoming_operation_id.as_str())?;
+        validate_peer_request_subject("resolution", req.resolution.as_str())?;
+        if req.base_version_seq < 0
+            || req.current_version_seq < 0
+            || req.requester_latest_position < 0
+        {
+            return Err(Status::invalid_argument(
+                "version and position fields must not be negative",
+            ));
+        }
+        if req.cluster_id != cluster_id {
+            return Err(Status::permission_denied(format!(
+                "peer cluster_id {} does not match local cluster_id {}",
+                req.cluster_id, cluster_id
+            )));
+        }
+
+        let config = ClusterConfig::load(self.data_dir.join(CLUSTER_CONFIG_FILE).as_path())
+            .map_err(status_from_hem)?;
+        let requester = config
+            .peers
+            .iter()
+            .find(|peer| peer.node_id == req.requester_node_id)
+            .ok_or_else(|| {
+                Status::permission_denied(format!(
+                    "requester node {} is not a configured cluster peer",
+                    req.requester_node_id
+                ))
+            })?;
+        if requester.public_key != req.requester_public_key {
+            return Err(Status::permission_denied(format!(
+                "requester public key mismatch for node {}",
+                req.requester_node_id
+            )));
+        }
+
+        let identity = NodeIdentity::load(self.data_dir.join(NODE_IDENTITY_FILE).as_path())
+            .map_err(status_from_hem)?;
+        if identity.node_id != node_id {
+            return Err(Status::failed_precondition(format!(
+                "hem cluster node identity mismatch: runtime={} identity={}",
+                node_id, identity.node_id
+            )));
+        }
+
+        let store = self.open_store()?;
+        let ledger = store.ledger_store().map_err(status_from_hem)?;
+        let latest_position = ledger.latest_position().map_err(status_from_hem)?;
+        let latest_body_hash_b64 = ledger
+            .latest_body_hash()
+            .map_err(status_from_hem)?
+            .unwrap_or_default();
+        let statement = CollisionAgreementStatement {
+            version: "hem-collision-agreement-v1",
+            cluster_id: cluster_id.as_str(),
+            requester_node_id: req.requester_node_id.as_str(),
+            approver_node_id: node_id.as_str(),
+            nonce: req.nonce.as_str(),
+            collision_id: req.collision_id.as_str(),
+            scope: req.scope.as_str(),
+            name: req.name.as_str(),
+            key: req.key.as_str(),
+            current_operation_id: req.current_operation_id.as_str(),
+            incoming_operation_id: req.incoming_operation_id.as_str(),
+            base_version_seq: req.base_version_seq,
+            current_version_seq: req.current_version_seq,
+            resolution: req.resolution.as_str(),
+            requester_latest_position: req.requester_latest_position,
+            requester_latest_body_hash_b64: req.requester_latest_body_hash_b64.as_str(),
+            approver_latest_position: latest_position,
+            approver_latest_body_hash_b64: latest_body_hash_b64.as_str(),
+        };
+        let statement_bytes = serde_json::to_vec(&statement).map_err(|err| {
+            Status::internal(format!(
+                "peer collision approval statement serialize failed: {err}"
+            ))
+        })?;
+        let statement_hash_b64 = node_statement_hash_b64(statement_bytes.as_slice());
+        let signature_b64 = identity
+            .sign_statement(statement_bytes.as_slice())
+            .map_err(status_from_hem)?;
+
+        info!(
+            cluster_id = %cluster_id,
+            node_id = %node_id,
+            requester_node_id = %req.requester_node_id,
+            collision_id = %req.collision_id,
+            resolution = %req.resolution,
+            latest_position,
+            "hem peer collision approval signed"
+        );
+
+        Ok(Response::new(PeerApproveCollisionResponse {
+            accepted: true,
+            cluster_id,
+            node_id,
+            latest_position,
+            latest_body_hash_b64,
+            statement_hash_b64,
+            signing_public_key_b64: identity.signing_public_key_b64,
+            signature_b64,
+            reason: String::new(),
+        }))
+    }
+
+    async fn peer_route_master_approval(
+        &self,
+        request: Request<PeerRouteMasterApprovalRequest>,
+    ) -> Result<Response<PeerRouteMasterApprovalResponse>, Status> {
+        let (cluster_id, node_id) = self.require_cluster_identity()?;
+        let authenticated_peer =
+            self.verify_peer_transport_auth(&request, PEER_METHOD_ROUTE_MASTER_APPROVAL)?;
+        let req = request.into_inner();
+        self.require_master_approval_node(node_id.as_str())?;
+        self.require_authenticated_peer_subject(
+            authenticated_peer.as_ref(),
+            req.requester_node_id.as_str(),
+            req.requester_public_key.as_str(),
+        )?;
+        self.require_configured_peer_requester(
+            req.cluster_id.as_str(),
+            req.requester_node_id.as_str(),
+            req.requester_public_key.as_str(),
+        )?;
+        if req.cluster_id != cluster_id {
+            return Err(Status::permission_denied(format!(
+                "peer cluster_id {} does not match local cluster_id {}",
+                req.cluster_id, cluster_id
+            )));
+        }
+        let scope = parse_scope_selector_or_global(req.scope)?;
+        let record = self
+            .approval_provider
+            .request_action_for_version(
+                scope,
+                req.secret_name,
+                normalize_optional_string(req.secret_version).as_deref(),
+                req.action.as_str(),
+                req.requested_by.as_str(),
+                req.reason.as_str(),
+                req.default_reason.as_str(),
+            )
+            .map_err(status_from_hem)?;
+        info!(
+            cluster_id = %cluster_id,
+            node_id = %node_id,
+            requester_node_id = %req.requester_node_id,
+            request_id = %record.request_id,
+            action = %req.action,
+            "hem master approval routed"
+        );
+        Ok(Response::new(PeerRouteMasterApprovalResponse {
+            accepted: true,
+            cluster_id,
+            node_id,
+            request: Some(to_proto_approval_request_info(&record)),
+            reason: String::new(),
+        }))
+    }
+
+    async fn peer_get_master_approval_status(
+        &self,
+        request: Request<PeerGetMasterApprovalStatusRequest>,
+    ) -> Result<Response<PeerGetMasterApprovalStatusResponse>, Status> {
+        let (cluster_id, node_id) = self.require_cluster_identity()?;
+        let authenticated_peer =
+            self.verify_peer_transport_auth(&request, PEER_METHOD_GET_MASTER_APPROVAL_STATUS)?;
+        let req = request.into_inner();
+        self.require_master_approval_node(node_id.as_str())?;
+        self.require_authenticated_peer_subject(
+            authenticated_peer.as_ref(),
+            req.requester_node_id.as_str(),
+            req.requester_public_key.as_str(),
+        )?;
+        self.require_configured_peer_requester(
+            req.cluster_id.as_str(),
+            req.requester_node_id.as_str(),
+            req.requester_public_key.as_str(),
+        )?;
+        if req.cluster_id != cluster_id {
+            return Err(Status::permission_denied(format!(
+                "peer cluster_id {} does not match local cluster_id {}",
+                req.cluster_id, cluster_id
+            )));
+        }
+        validate_peer_request_subject("request_id", req.request_id.as_str())?;
+        let record = self
+            .approval_provider
+            .get_request(req.request_id.as_str())
+            .map_err(status_from_hem)?;
+        Ok(Response::new(PeerGetMasterApprovalStatusResponse {
+            found: true,
+            cluster_id,
+            node_id,
+            request: Some(to_proto_approval_request_info(&record)),
+            approval_receipt: record.approval_receipt.unwrap_or_default(),
+        }))
+    }
+
+    async fn peer_consume_master_approval_receipt(
+        &self,
+        request: Request<PeerConsumeMasterApprovalReceiptRequest>,
+    ) -> Result<Response<PeerConsumeMasterApprovalReceiptResponse>, Status> {
+        let (cluster_id, node_id) = self.require_cluster_identity()?;
+        let authenticated_peer =
+            self.verify_peer_transport_auth(&request, PEER_METHOD_CONSUME_MASTER_APPROVAL_RECEIPT)?;
+        let req = request.into_inner();
+        self.require_master_approval_node(node_id.as_str())?;
+        self.require_authenticated_peer_subject(
+            authenticated_peer.as_ref(),
+            req.requester_node_id.as_str(),
+            req.requester_public_key.as_str(),
+        )?;
+        self.require_configured_peer_requester(
+            req.cluster_id.as_str(),
+            req.requester_node_id.as_str(),
+            req.requester_public_key.as_str(),
+        )?;
+        if req.cluster_id != cluster_id {
+            return Err(Status::permission_denied(format!(
+                "peer cluster_id {} does not match local cluster_id {}",
+                req.cluster_id, cluster_id
+            )));
+        }
+        let scope = parse_scope_selector_or_global(req.scope)?;
+        let request_id = self
+            .approval_provider
+            .consume_receipt_for_version(
+                &scope,
+                req.secret_name.as_str(),
+                normalize_optional_string(req.secret_version).as_deref(),
+                req.action.as_str(),
+                req.approval_receipt.as_str(),
+                req.actor.as_str(),
+            )
+            .map_err(status_from_hem)?;
+        info!(
+            cluster_id = %cluster_id,
+            node_id = %node_id,
+            requester_node_id = %req.requester_node_id,
+            request_id = %request_id,
+            action = %req.action,
+            "hem master approval receipt consumed"
+        );
+        Ok(Response::new(PeerConsumeMasterApprovalReceiptResponse {
+            consumed: true,
+            cluster_id,
+            node_id,
+            request_id,
+        }))
+    }
+
+    async fn peer_list_operations(
+        &self,
+        request: Request<PeerListOperationsRequest>,
+    ) -> Result<Response<PeerListOperationsResponse>, Status> {
+        let _ = self.require_cluster_identity()?;
+        let authenticated_peer =
+            self.verify_peer_transport_auth(&request, PEER_METHOD_LIST_OPERATIONS)?;
+        let req = request.into_inner();
+        if let Some(peer) = authenticated_peer.as_ref() {
+            if !req.peer_node_id.is_empty() && req.peer_node_id != peer.node_id {
+                return Err(Status::unauthenticated(format!(
+                    "peer_node_id {} does not match authenticated peer {}",
+                    req.peer_node_id, peer.node_id
+                )));
+            }
+        }
+        if req.after_position < 0 {
+            return Err(Status::invalid_argument(
+                "after_position must not be negative",
+            ));
+        }
+        let limit = if req.limit == 0 {
+            100
+        } else {
+            req.limit.min(1_000) as usize
+        };
+        let store = self.open_store()?;
+        let ledger = store.ledger_store().map_err(status_from_hem)?;
+        let after_position = if req.use_recorded_cursor {
+            validate_peer_request_subject("peer node_id", req.peer_node_id.as_str())?;
+            ledger
+                .get_peer_cursor(req.peer_node_id.as_str())
+                .map_err(status_from_hem)?
+                .map(|cursor| cursor.last_position)
+                .unwrap_or(0)
+        } else {
+            req.after_position
+        };
+        let operations = ledger
+            .list_after(after_position, limit)
+            .map_err(status_from_hem)?;
+        Ok(Response::new(PeerListOperationsResponse {
+            operations: operations.iter().map(to_proto_ledger_operation).collect(),
+            latest_position: ledger.latest_position().map_err(status_from_hem)?,
+            latest_body_hash_b64: ledger
+                .latest_body_hash()
+                .map_err(status_from_hem)?
+                .unwrap_or_default(),
+        }))
+    }
+
+    async fn peer_ack_operations(
+        &self,
+        request: Request<PeerAckOperationsRequest>,
+    ) -> Result<Response<PeerAckOperationsResponse>, Status> {
+        let _ = self.require_cluster_identity()?;
+        let authenticated_peer =
+            self.verify_peer_transport_auth(&request, PEER_METHOD_ACK_OPERATIONS)?;
+        let req = request.into_inner();
+        validate_peer_request_subject("peer node_id", req.peer_node_id.as_str())?;
+        if let Some(peer) = authenticated_peer.as_ref() {
+            if req.peer_node_id != peer.node_id {
+                return Err(Status::unauthenticated(format!(
+                    "peer_node_id {} does not match authenticated peer {}",
+                    req.peer_node_id, peer.node_id
+                )));
+            }
+        }
+        let store = self.open_store()?;
+        let ledger = store.ledger_store().map_err(status_from_hem)?;
+        ledger
+            .record_peer_cursor(
+                req.peer_node_id.as_str(),
+                req.position,
+                req.body_hash_b64.as_str(),
+            )
+            .map_err(status_from_hem)?;
+        Ok(Response::new(PeerAckOperationsResponse {
+            recorded: true,
+            next_position: req.position + 1,
+        }))
+    }
+
+    async fn peer_push_operations(
+        &self,
+        request: Request<PeerPushOperationsRequest>,
+    ) -> Result<Response<PeerPushOperationsResponse>, Status> {
+        let _ = self.require_cluster_identity()?;
+        self.verify_peer_transport_auth(&request, PEER_METHOD_PUSH_OPERATIONS)?;
+        let req = request.into_inner();
+        let store = self.open_store()?;
+        let ledger = store.ledger_store().map_err(status_from_hem)?;
+        let mut accepted_count = 0_u32;
+        for envelope in req.operations {
+            let envelope = from_proto_ledger_operation(envelope)?;
+            envelope.verify().map_err(status_from_hem)?;
+            if let Some(existing) = ledger
+                .get_by_operation_id(envelope.body.operation_id.as_str())
+                .map_err(status_from_hem)?
+            {
+                if existing.body_hash_b64 == envelope.body_hash_b64 {
+                    continue;
+                }
+                return Err(Status::already_exists(format!(
+                    "ledger operation {} already exists with a different hash",
+                    envelope.body.operation_id
+                )));
+            }
+            ledger.append_signed(&envelope).map_err(status_from_hem)?;
+            accepted_count += 1;
+        }
+        Ok(Response::new(PeerPushOperationsResponse {
+            accepted_count,
+            latest_position: ledger.latest_position().map_err(status_from_hem)?,
+            latest_body_hash_b64: ledger
+                .latest_body_hash()
+                .map_err(status_from_hem)?
+                .unwrap_or_default(),
+        }))
+    }
+
+    async fn peer_cosign_checkpoint(
+        &self,
+        request: Request<PeerCosignCheckpointRequest>,
+    ) -> Result<Response<PeerCosignCheckpointResponse>, Status> {
+        let (cluster_id, node_id) = self.require_cluster_identity()?;
+        let authenticated_peer =
+            self.verify_peer_transport_auth(&request, PEER_METHOD_COSIGN_CHECKPOINT)?;
+        let req = request.into_inner();
+        validate_peer_request_subject("requester node_id", req.requester_node_id.as_str())?;
+        validate_peer_request_subject("requester public_key", req.requester_public_key.as_str())?;
+        self.require_authenticated_peer_subject(
+            authenticated_peer.as_ref(),
+            req.requester_node_id.as_str(),
+            req.requester_public_key.as_str(),
+        )?;
+
+        let config = ClusterConfig::load(self.data_dir.join(CLUSTER_CONFIG_FILE).as_path())
+            .map_err(status_from_hem)?;
+        let requester = config
+            .peers
+            .iter()
+            .find(|peer| peer.node_id == req.requester_node_id)
+            .ok_or_else(|| {
+                Status::permission_denied(format!(
+                    "requester node {} is not a configured cluster peer",
+                    req.requester_node_id
+                ))
+            })?;
+        if requester.public_key != req.requester_public_key {
+            return Err(Status::permission_denied(format!(
+                "requester public key mismatch for node {}",
+                req.requester_node_id
+            )));
+        }
+
+        let checkpoint = from_proto_checkpoint(
+            req.checkpoint
+                .ok_or_else(|| Status::invalid_argument("checkpoint is required"))?,
+        )?;
+        if checkpoint.body.cluster_id != cluster_id {
+            return Err(Status::permission_denied(format!(
+                "checkpoint cluster_id {} does not match local cluster_id {}",
+                checkpoint.body.cluster_id, cluster_id
+            )));
+        }
+        if checkpoint.signing_public_key_b64 != req.requester_public_key {
+            return Err(Status::permission_denied(format!(
+                "checkpoint signer public key does not match requester {}",
+                req.requester_node_id
+            )));
+        }
+        if checkpoint.signer_node_id != req.requester_node_id {
+            return Err(Status::permission_denied(format!(
+                "checkpoint signer node_id does not match requester {}",
+                req.requester_node_id
+            )));
+        }
+
+        let identity = NodeIdentity::load(self.data_dir.join(NODE_IDENTITY_FILE).as_path())
+            .map_err(status_from_hem)?;
+        if identity.node_id != node_id {
+            return Err(Status::failed_precondition(format!(
+                "hem cluster node identity mismatch: runtime={} identity={}",
+                node_id, identity.node_id
+            )));
+        }
+
+        let store = self.open_store()?;
+        let ledger = store.ledger_store().map_err(status_from_hem)?;
+        ledger
+            .ingest_checkpoint(&checkpoint)
+            .map_err(checkpoint_cosign_status_from_hem)?;
+        let cosignature = ledger
+            .cosign_checkpoint(&identity, checkpoint.body.checkpoint_id.as_str())
+            .map_err(status_from_hem)?;
+
+        Ok(Response::new(PeerCosignCheckpointResponse {
+            accepted: true,
+            cluster_id,
+            node_id,
+            cosignature: Some(to_proto_checkpoint_cosignature(&cosignature)),
+            reason: String::new(),
+        }))
+    }
+
     async fn init_hem(
         &self,
         request: Request<InitHemRequest>,
@@ -1675,6 +3806,15 @@ impl HemRuntime for HemRuntimeService {
         let actor = normalize_optional_string(req.actor).unwrap_or_else(|| caller.actor.clone());
         let (new_key_id, rotated_secret_count) =
             store.rotate_master_key().map_err(status_from_hem)?;
+        self.append_cluster_event_operation(
+            &store,
+            "master_key.rotated",
+            serde_json::json!({
+                "actor": actor.as_str(),
+                "new_key_id": new_key_id.as_str(),
+                "rotated_secret_count": rotated_secret_count,
+            }),
+        )?;
         if let Ok(refreshed) = HemStore::open(self.data_dir.as_path()) {
             if let Ok(manager) = refreshed.token_manager() {
                 if let Ok(operator) = manager.issue_operator_token(
@@ -1745,9 +3885,32 @@ impl HemRuntime for HemRuntimeService {
         authorize_admin(&caller.claims).map_err(status_from_hem)?;
         let req = request.into_inner();
         let actor = normalize_optional_string(req.actor).unwrap_or_else(|| caller.actor.clone());
-        let imported_secret_count = store
-            .import_secrets_bundle(req.encrypted_bundle.as_slice(), req.merge)
+        let report = store
+            .import_secrets_bundle_with_report(req.encrypted_bundle.as_slice(), req.merge)
             .map_err(status_from_hem)?;
+        for secret in &report.imported_secrets {
+            self.append_cluster_secret_set(
+                &store,
+                &secret.scope,
+                secret.name.as_str(),
+                actor.as_str(),
+            )?;
+        }
+        self.append_cluster_event_operation(
+            &store,
+            "secrets.imported",
+            serde_json::json!({
+                "actor": actor.as_str(),
+                "merge": req.merge,
+                "imported_secret_count": report.imported_secret_count,
+                "imported": report.imported_secrets.iter().map(|secret| {
+                    serde_json::json!({
+                        "scope": scope_label(&secret.scope),
+                        "name": secret.name.as_str(),
+                    })
+                }).collect::<Vec<_>>(),
+            }),
+        )?;
         self.audit(
             &store,
             Some(&caller),
@@ -1756,12 +3919,12 @@ impl HemRuntime for HemRuntimeService {
             "ok",
             format!(
                 "actor={} merge={} imported_secret_count={}",
-                actor, req.merge, imported_secret_count
+                actor, req.merge, report.imported_secret_count
             )
             .as_str(),
         );
         Ok(Response::new(ImportSecretsResponse {
-            imported_secret_count,
+            imported_secret_count: report.imported_secret_count,
         }))
     }
 
@@ -1770,9 +3933,141 @@ impl HemRuntime for HemRuntimeService {
         _request: Request<HealthRequest>,
     ) -> Result<Response<HealthResponse>, Status> {
         Ok(Response::new(HealthResponse {
-            status: "ok".to_string(),
+            status: self.cluster_runtime.health_status(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClusterSyncSettings {
+    enabled: bool,
+    interval: Duration,
+    batch_limit: u32,
+    max_backoff: Duration,
+}
+
+impl ClusterSyncSettings {
+    fn from_env(cluster_enabled: bool, force_offline: bool) -> Self {
+        let mut settings = Self::from_values(
+            cluster_enabled,
+            force_offline,
+            std::env::var("VALHALL_HEM_CLUSTER_SYNC").ok().as_deref(),
+            std::env::var("VALHALL_HEM_CLUSTER_SYNC_INTERVAL_MS")
+                .ok()
+                .as_deref(),
+            std::env::var("VALHALL_HEM_CLUSTER_SYNC_MAX_BACKOFF_MS")
+                .ok()
+                .as_deref(),
+        );
+        settings.batch_limit = parse_u32_value(
+            std::env::var("VALHALL_HEM_CLUSTER_SYNC_BATCH_LIMIT")
+                .ok()
+                .as_deref(),
+            DEFAULT_CLUSTER_SYNC_BATCH_LIMIT,
+            1,
+            10_000,
+        );
+        settings
+    }
+
+    fn from_values(
+        cluster_enabled: bool,
+        force_offline: bool,
+        enabled_value: Option<&str>,
+        interval_ms_value: Option<&str>,
+        max_backoff_ms_value: Option<&str>,
+    ) -> Self {
+        let requested_enabled = enabled_value.map(parse_bool_like).unwrap_or(true);
+        Self {
+            enabled: cluster_enabled && !force_offline && requested_enabled,
+            interval: parse_duration_ms_value(
+                interval_ms_value,
+                DEFAULT_CLUSTER_SYNC_INTERVAL_MS,
+                50,
+                60_000,
+            ),
+            batch_limit: DEFAULT_CLUSTER_SYNC_BATCH_LIMIT,
+            max_backoff: parse_duration_ms_value(
+                max_backoff_ms_value,
+                DEFAULT_CLUSTER_SYNC_MAX_BACKOFF_MS,
+                50,
+                300_000,
+            ),
+        }
+    }
+
+    fn backoff_for_failure(&self, peer_node_id: &str, failure_count: u32) -> Duration {
+        if failure_count == 0 {
+            return Duration::ZERO;
+        }
+
+        let base_ms = duration_millis_u64(self.interval);
+        let max_ms = duration_millis_u64(self.max_backoff).max(base_ms);
+        let multiplier = 1_u64 << failure_count.saturating_sub(1).min(10);
+        let raw_ms = base_ms.saturating_mul(multiplier).min(max_ms);
+        let jitter_window = (base_ms / 4).clamp(1, 250);
+        let jitter_ms = stable_jitter_ms(peer_node_id, failure_count) % (jitter_window + 1);
+        Duration::from_millis(raw_ms.saturating_add(jitter_ms).min(max_ms))
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct PeerSyncState {
+    failures: u32,
+    next_attempt: Option<Instant>,
+}
+
+#[derive(Debug)]
+struct ClusterPeerSyncReport {
+    accepted: bool,
+    peer_latest_position: i64,
+    pulled_operations: usize,
+    pushed_operations: u32,
+    local_latest_position: i64,
+    checkpoint_id: Option<String>,
+    checkpoint_position: Option<i64>,
+    checkpoint_cosigned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClusterRuntimeInfo {
+    enabled: bool,
+    cluster_id: Option<String>,
+    node_id: Option<String>,
+    master_node_id: Option<String>,
+    peer_count: usize,
+    force_offline: bool,
+    sync_enabled: bool,
+}
+
+impl ClusterRuntimeInfo {
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            cluster_id: None,
+            node_id: None,
+            master_node_id: None,
+            peer_count: 0,
+            force_offline: false,
+            sync_enabled: false,
+        }
+    }
+
+    fn is_master_node(&self) -> bool {
+        self.enabled
+            && self.node_id.is_some()
+            && self.node_id.as_deref() == self.master_node_id.as_deref()
+    }
+
+    fn health_status(&self) -> String {
+        match (self.enabled, self.node_id.as_ref()) {
+            (true, Some(node_id)) => format!(
+                "ok cluster_enabled=true cluster_node_id={node_id} cluster_peers={} force_offline={} sync_enabled={}",
+                self.peer_count, self.force_offline, self.sync_enabled
+            ),
+            _ => "ok cluster_enabled=false".to_string(),
+        }
     }
 }
 
@@ -2057,6 +4352,225 @@ fn parse_optional_rfc3339(field: &str, value: String) -> Result<Option<DateTime<
     Ok(Some(parsed.with_timezone(&Utc)))
 }
 
+fn parse_required_rfc3339(field: &str, value: &str) -> Result<DateTime<Utc>, Status> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(Status::invalid_argument(format!(
+            "{field} must not be empty"
+        )));
+    }
+    DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| Status::invalid_argument(format!("{field} must be RFC3339 timestamp")))
+}
+
+fn validate_peer_request_subject(label: &str, value: &str) -> Result<(), Status> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(Status::invalid_argument(format!(
+            "{label} must not be empty"
+        )));
+    }
+    if trimmed != value {
+        return Err(Status::invalid_argument(format!(
+            "{label} must not have leading/trailing whitespace"
+        )));
+    }
+    Ok(())
+}
+
+fn required_peer_metadata<'a>(
+    metadata: &'a MetadataMap,
+    key: &'static str,
+) -> Result<&'a str, Status> {
+    metadata
+        .get(key)
+        .ok_or_else(|| Status::unauthenticated(format!("missing peer auth metadata {key}")))?
+        .to_str()
+        .map_err(|err| {
+            Status::unauthenticated(format!("peer auth metadata {key} is not ASCII: {err}"))
+        })
+}
+
+fn signed_peer_transport_request<T>(
+    message: T,
+    identity: &NodeIdentity,
+    cluster_id: &str,
+    method: &str,
+) -> hem_core::Result<Request<T>> {
+    let nonce = format!(
+        "hpt_{}",
+        valhall_config::ids::generate_entropy_prefixed_ulid()
+    );
+    let timestamp_unix = Utc::now().timestamp();
+    let statement_bytes = peer_transport_auth_statement_bytes(
+        cluster_id,
+        identity.node_id.as_str(),
+        method,
+        nonce.as_str(),
+        timestamp_unix,
+    )?;
+    let signature = identity.sign_statement(statement_bytes.as_slice())?;
+
+    let mut request = Request::new(message);
+    let metadata = request.metadata_mut();
+    metadata.insert(
+        PEER_TRANSPORT_AUTH_CLUSTER_ID_METADATA_KEY,
+        cluster_id.parse().map_err(|err| {
+            HemError::InvalidArgument(format!("peer auth cluster_id metadata invalid: {err}"))
+        })?,
+    );
+    metadata.insert(
+        PEER_TRANSPORT_AUTH_NODE_ID_METADATA_KEY,
+        identity.node_id.parse().map_err(|err| {
+            HemError::InvalidArgument(format!("peer auth node_id metadata invalid: {err}"))
+        })?,
+    );
+    metadata.insert(
+        PEER_TRANSPORT_AUTH_METHOD_METADATA_KEY,
+        method.parse().map_err(|err| {
+            HemError::InvalidArgument(format!("peer auth method metadata invalid: {err}"))
+        })?,
+    );
+    metadata.insert(
+        PEER_TRANSPORT_AUTH_NONCE_METADATA_KEY,
+        nonce.parse().map_err(|err| {
+            HemError::InvalidArgument(format!("peer auth nonce metadata invalid: {err}"))
+        })?,
+    );
+    metadata.insert(
+        PEER_TRANSPORT_AUTH_TIMESTAMP_METADATA_KEY,
+        timestamp_unix.to_string().parse().map_err(|err| {
+            HemError::InvalidArgument(format!("peer auth timestamp metadata invalid: {err}"))
+        })?,
+    );
+    metadata.insert(
+        PEER_TRANSPORT_AUTH_SIGNATURE_METADATA_KEY,
+        signature.parse().map_err(|err| {
+            HemError::InvalidArgument(format!("peer auth signature metadata invalid: {err}"))
+        })?,
+    );
+    Ok(request)
+}
+
+fn to_proto_ledger_operation(
+    operation: &hem_core::LedgerOperation,
+) -> proto::LedgerOperationEnvelope {
+    proto::LedgerOperationEnvelope {
+        body: Some(proto::LedgerOperationBody {
+            operation_id: operation.operation_id.clone(),
+            cluster_id: operation.cluster_id.clone(),
+            node_id: operation.node_id.clone(),
+            node_seq: operation.node_seq,
+            op_type: operation.op_type.clone(),
+            payload_json: operation.payload_json.to_string(),
+            created_at: operation.created_at.to_rfc3339(),
+            prev_hash_b64: operation.prev_hash_b64.clone(),
+        }),
+        body_hash_b64: operation.body_hash_b64.clone(),
+        signing_public_key_b64: operation.signing_public_key_b64.clone(),
+        signature_b64: operation.signature_b64.clone(),
+        position: operation.position,
+    }
+}
+
+fn from_proto_ledger_operation(
+    operation: proto::LedgerOperationEnvelope,
+) -> Result<CoreLedgerOperationEnvelope, Status> {
+    let body = operation
+        .body
+        .ok_or_else(|| Status::invalid_argument("ledger operation body is required"))?;
+    let payload_json = serde_json::from_str(body.payload_json.as_str())
+        .map_err(|err| Status::invalid_argument(format!("payload_json must be JSON: {err}")))?;
+    Ok(CoreLedgerOperationEnvelope {
+        body: CoreLedgerOperationBody {
+            operation_id: body.operation_id,
+            cluster_id: body.cluster_id,
+            node_id: body.node_id,
+            node_seq: body.node_seq,
+            op_type: body.op_type,
+            payload_json,
+            created_at: parse_required_rfc3339("created_at", body.created_at.as_str())?,
+            prev_hash_b64: body.prev_hash_b64,
+        },
+        body_hash_b64: operation.body_hash_b64,
+        signing_public_key_b64: operation.signing_public_key_b64,
+        signature_b64: operation.signature_b64,
+    })
+}
+
+fn to_proto_checkpoint(checkpoint: &CoreLedgerCheckpoint) -> proto::LedgerCheckpoint {
+    proto::LedgerCheckpoint {
+        body: Some(proto::LedgerCheckpointBody {
+            checkpoint_id: checkpoint.body.checkpoint_id.clone(),
+            cluster_id: checkpoint.body.cluster_id.clone(),
+            to_position: checkpoint.body.to_position,
+            operation_count: checkpoint.body.operation_count,
+            merkle_root_b64: checkpoint.body.merkle_root_b64.clone(),
+            created_at: checkpoint.body.created_at.to_rfc3339(),
+        }),
+        body_hash_b64: checkpoint.body_hash_b64.clone(),
+        signer_node_id: checkpoint.signer_node_id.clone(),
+        signing_public_key_b64: checkpoint.signing_public_key_b64.clone(),
+        signature_b64: checkpoint.signature_b64.clone(),
+    }
+}
+
+fn from_proto_checkpoint(
+    checkpoint: proto::LedgerCheckpoint,
+) -> Result<CoreLedgerCheckpoint, Status> {
+    let body = checkpoint
+        .body
+        .ok_or_else(|| Status::invalid_argument("checkpoint body is required"))?;
+    Ok(CoreLedgerCheckpoint {
+        body: CoreLedgerCheckpointBody {
+            checkpoint_id: body.checkpoint_id,
+            cluster_id: body.cluster_id,
+            to_position: body.to_position,
+            operation_count: body.operation_count,
+            merkle_root_b64: body.merkle_root_b64,
+            created_at: parse_required_rfc3339("created_at", body.created_at.as_str())?,
+        },
+        body_hash_b64: checkpoint.body_hash_b64,
+        signer_node_id: checkpoint.signer_node_id,
+        signing_public_key_b64: checkpoint.signing_public_key_b64,
+        signature_b64: checkpoint.signature_b64,
+    })
+}
+
+fn to_proto_checkpoint_cosignature(
+    cosignature: &CoreLedgerCheckpointCosignature,
+) -> proto::LedgerCheckpointCosignature {
+    proto::LedgerCheckpointCosignature {
+        body: Some(proto::LedgerCheckpointCosignatureBody {
+            checkpoint_id: cosignature.body.checkpoint_id.clone(),
+            checkpoint_body_hash_b64: cosignature.body.checkpoint_body_hash_b64.clone(),
+            signer_node_id: cosignature.body.signer_node_id.clone(),
+            signed_at: cosignature.body.signed_at.to_rfc3339(),
+        }),
+        signing_public_key_b64: cosignature.signing_public_key_b64.clone(),
+        signature_b64: cosignature.signature_b64.clone(),
+    }
+}
+
+fn from_proto_checkpoint_cosignature(
+    cosignature: proto::LedgerCheckpointCosignature,
+) -> Result<CoreLedgerCheckpointCosignature, Status> {
+    let body = cosignature
+        .body
+        .ok_or_else(|| Status::invalid_argument("checkpoint cosignature body is required"))?;
+    Ok(CoreLedgerCheckpointCosignature {
+        body: CoreLedgerCheckpointCosignatureBody {
+            checkpoint_id: body.checkpoint_id,
+            checkpoint_body_hash_b64: body.checkpoint_body_hash_b64,
+            signer_node_id: body.signer_node_id,
+            signed_at: parse_required_rfc3339("signed_at", body.signed_at.as_str())?,
+        },
+        signing_public_key_b64: cosignature.signing_public_key_b64,
+        signature_b64: cosignature.signature_b64,
+    })
+}
+
 fn to_proto_token_info(claims: &TokenClaims) -> TokenInfo {
     TokenInfo {
         token_id: claims.token_id.clone(),
@@ -2127,6 +4641,16 @@ fn scope_label(scope: &SecretScope) -> String {
     }
 }
 
+fn secret_not_found_status(scope: &SecretScope, name: &str) -> Status {
+    Status::not_found(format!("secret not found: {}/{}", scope_label(scope), name))
+}
+
+fn sorted_secret_keys<'a>(keys: impl Iterator<Item = &'a String>) -> Vec<String> {
+    let mut keys = keys.cloned().collect::<Vec<_>>();
+    keys.sort();
+    keys
+}
+
 fn parse_secret_name(name: &str) -> Result<String, Status> {
     parse_subject("name", name)
 }
@@ -2175,6 +4699,54 @@ fn normalize_optional_string(value: String) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn parse_bool_env(key: &str) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|value| parse_bool_like(value.as_str()))
+        .unwrap_or(false)
+}
+
+fn parse_bool_like(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn parse_duration_ms_value(
+    value: Option<&str>,
+    default_ms: u64,
+    min_ms: u64,
+    max_ms: u64,
+) -> Duration {
+    Duration::from_millis(parse_u64_value(value, default_ms, min_ms, max_ms))
+}
+
+fn parse_u32_value(value: Option<&str>, default: u32, min: u32, max: u32) -> u32 {
+    value
+        .and_then(|item| item.trim().parse::<u32>().ok())
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
+fn parse_u64_value(value: Option<&str>, default: u64, min: u64, max: u64) -> u64 {
+    value
+        .and_then(|item| item.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn stable_jitter_ms(peer_node_id: &str, failure_count: u32) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    peer_node_id.hash(&mut hasher);
+    failure_count.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn to_proto_secret_scope_selector(scope: &SecretScope) -> proto::ScopeSelector {
@@ -2297,6 +4869,7 @@ fn to_proto_approval_request_info(record: &DeleteApprovalRecord) -> proto::Appro
         resolved_by: record.resolved_by.clone().unwrap_or_default(),
         resolve_message: record.resolve_message.clone(),
         action: record.action.clone(),
+        secret_version: record.secret_version.clone().unwrap_or_default(),
     }
 }
 
@@ -2306,6 +4879,16 @@ fn to_proto_approval_state(state: CoreApprovalState) -> i32 {
         CoreApprovalState::Approved => proto::ApprovalState::Approved as i32,
         CoreApprovalState::Denied => proto::ApprovalState::Denied as i32,
         CoreApprovalState::TimedOut => proto::ApprovalState::TimedOut as i32,
+    }
+}
+
+fn proto_approval_state_to_core(state: proto::ApprovalState) -> CoreApprovalState {
+    match state {
+        proto::ApprovalState::Pending => CoreApprovalState::Pending,
+        proto::ApprovalState::Approved => CoreApprovalState::Approved,
+        proto::ApprovalState::Denied => CoreApprovalState::Denied,
+        proto::ApprovalState::TimedOut => CoreApprovalState::TimedOut,
+        proto::ApprovalState::Unspecified => CoreApprovalState::Pending,
     }
 }
 
@@ -2331,8 +4914,24 @@ fn status_from_hem(err: HemError) -> Status {
         HemError::AuthorizationDenied(_) => Status::permission_denied(err.to_string()),
         HemError::Io(_)
         | HemError::Serde(_)
+        | HemError::Sqlite(_)
         | HemError::MasterKeyParse(_)
         | HemError::Crypto(_) => Status::internal(err.to_string()),
+    }
+}
+
+fn checkpoint_cosign_status_from_hem(err: HemError) -> Status {
+    match err {
+        HemError::InvalidArgument(message)
+            if message.contains("checkpoint position")
+                || message.contains("checkpoint operation count mismatch") =>
+        {
+            Status::failed_precondition(message)
+        }
+        HemError::Crypto(message) if message.contains("checkpoint merkle root mismatch") => {
+            Status::failed_precondition(message)
+        }
+        other => status_from_hem(other),
     }
 }
 
@@ -2370,6 +4969,432 @@ fn resolve_data_dir(override_value: Option<String>) -> PathBuf {
     PathBuf::from(DEFAULT_HEM_SUBDIR)
 }
 
+fn load_cluster_runtime(data_dir: &Path) -> Result<ClusterRuntimeInfo, Box<dyn std::error::Error>> {
+    let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
+    if !config_path.exists() {
+        return Ok(ClusterRuntimeInfo::disabled());
+    }
+
+    let config = ClusterConfig::load(config_path.as_path())?;
+    if !config.enabled {
+        return Ok(ClusterRuntimeInfo::disabled());
+    }
+
+    let identity_path = data_dir.join(NODE_IDENTITY_FILE);
+    let identity = NodeIdentity::load(identity_path.as_path())?;
+    if identity.node_id != config.node_id {
+        return Err(HemError::InvalidArgument(format!(
+            "cluster node_id {} does not match node identity {}",
+            config.node_id, identity.node_id
+        ))
+        .into());
+    }
+
+    let force_offline = parse_bool_env("VALHALL_HEM_FORCE_OFFLINE");
+    let sync_settings = ClusterSyncSettings::from_env(true, force_offline);
+    Ok(ClusterRuntimeInfo {
+        enabled: true,
+        cluster_id: Some(config.cluster_id),
+        node_id: Some(config.node_id),
+        master_node_id: config.master_node_id,
+        peer_count: config.peers.len(),
+        force_offline,
+        sync_enabled: sync_settings.enabled,
+    })
+}
+
+fn spawn_cluster_sync_loop(
+    data_dir: PathBuf,
+    runtime: &ClusterRuntimeInfo,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let settings = ClusterSyncSettings::from_env(runtime.enabled, runtime.force_offline);
+    if !settings.enabled {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        run_cluster_sync_loop(data_dir, settings).await;
+    }))
+}
+
+async fn run_cluster_sync_loop(data_dir: PathBuf, settings: ClusterSyncSettings) {
+    let mut peer_states: HashMap<String, PeerSyncState> = HashMap::new();
+    let mut interval = tokio::time::interval(settings.interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        interval.tick().await;
+        let now = Instant::now();
+        let config = match ClusterConfig::load(data_dir.join(CLUSTER_CONFIG_FILE).as_path()) {
+            Ok(config) if config.enabled => config,
+            Ok(_) => continue,
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    data_dir = %data_dir.display(),
+                    "hem cluster sync config load failed"
+                );
+                continue;
+            }
+        };
+        let identity = match NodeIdentity::load(data_dir.join(NODE_IDENTITY_FILE).as_path()) {
+            Ok(identity) => identity,
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    data_dir = %data_dir.display(),
+                    "hem cluster sync identity load failed"
+                );
+                continue;
+            }
+        };
+        if identity.node_id != config.node_id {
+            warn!(
+                cluster_node_id = %config.node_id,
+                identity_node_id = %identity.node_id,
+                "hem cluster sync identity mismatch"
+            );
+            continue;
+        }
+        match ensure_latest_cluster_checkpoint(data_dir.as_path(), &config, &identity) {
+            Ok(Some(checkpoint)) => {
+                info!(
+                    cluster_id = %config.cluster_id,
+                    node_id = %config.node_id,
+                    checkpoint_id = %checkpoint.body.checkpoint_id,
+                    checkpoint_position = checkpoint.body.to_position,
+                    "hem cluster checkpoint available"
+                );
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!(
+                    cluster_id = %config.cluster_id,
+                    node_id = %config.node_id,
+                    error = %err,
+                    "hem cluster checkpoint creation failed"
+                );
+            }
+        }
+
+        for peer in config.peers.clone() {
+            let state = peer_states.entry(peer.node_id.clone()).or_default();
+            if state
+                .next_attempt
+                .map(|next_attempt| now < next_attempt)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            info!(
+                cluster_id = %config.cluster_id,
+                node_id = %config.node_id,
+                peer_node_id = %peer.node_id,
+                peer_endpoint = %peer.endpoint,
+                "hem cluster sync peer start"
+            );
+            match sync_configured_peer_once(
+                data_dir.as_path(),
+                &config,
+                &identity,
+                &peer,
+                settings.batch_limit,
+            )
+            .await
+            {
+                Ok(report) => {
+                    state.failures = 0;
+                    state.next_attempt = Some(Instant::now() + settings.interval);
+                    let lag = report
+                        .peer_latest_position
+                        .saturating_sub(report.local_latest_position)
+                        .max(0);
+                    info!(
+                        cluster_id = %config.cluster_id,
+                        node_id = %config.node_id,
+                        peer_node_id = %peer.node_id,
+                        peer_endpoint = %peer.endpoint,
+                        peer_accepted = report.accepted,
+                        peer_latest_position = report.peer_latest_position,
+                        pulled_operations = report.pulled_operations,
+                        pushed_operations = report.pushed_operations,
+                        local_latest_position = report.local_latest_position,
+                        checkpoint_id = report.checkpoint_id.as_deref().unwrap_or(""),
+                        checkpoint_position = report.checkpoint_position.unwrap_or(0),
+                        checkpoint_cosigned = report.checkpoint_cosigned,
+                        lag,
+                        "hem cluster sync peer success"
+                    );
+                }
+                Err(err) => {
+                    state.failures = state.failures.saturating_add(1);
+                    let backoff =
+                        settings.backoff_for_failure(peer.node_id.as_str(), state.failures);
+                    state.next_attempt = Some(Instant::now() + backoff);
+                    warn!(
+                        cluster_id = %config.cluster_id,
+                        node_id = %config.node_id,
+                        peer_node_id = %peer.node_id,
+                        peer_endpoint = %peer.endpoint,
+                        failures = state.failures,
+                        backoff_ms = duration_millis_u64(backoff),
+                        error = %err,
+                        "hem cluster sync peer failure"
+                    );
+                }
+            }
+        }
+    }
+}
+
+async fn sync_configured_peer_once(
+    data_dir: &Path,
+    config: &ClusterConfig,
+    identity: &NodeIdentity,
+    peer: &PeerConfig,
+    batch_limit: u32,
+) -> Result<ClusterPeerSyncReport, Box<dyn std::error::Error + Send + Sync>> {
+    let channel = Endpoint::from_shared(peer.endpoint.clone())?
+        .connect_timeout(Duration::from_secs(CLUSTER_SYNC_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(CLUSTER_SYNC_RPC_TIMEOUT_SECS))
+        .connect()
+        .await?;
+    let mut client = HemRuntimeClient::new(channel);
+    let hello = client
+        .peer_hello(signed_peer_transport_request(
+            PeerHelloRequest {
+                cluster_id: config.cluster_id.clone(),
+                node_id: config.node_id.clone(),
+                public_key: identity.signing_public_key_b64.clone(),
+            },
+            identity,
+            config.cluster_id.as_str(),
+            PEER_METHOD_HELLO,
+        )?)
+        .await?
+        .into_inner();
+    if !hello.accepted {
+        return Err(format!("peer {} rejected hello", peer.node_id).into());
+    }
+    if hello.node_id != peer.node_id {
+        return Err(format!(
+            "peer hello node_id mismatch expected={} actual={}",
+            peer.node_id, hello.node_id
+        )
+        .into());
+    }
+    if hello.cluster_id != config.cluster_id {
+        return Err(format!(
+            "peer hello cluster_id mismatch expected={} actual={}",
+            config.cluster_id, hello.cluster_id
+        )
+        .into());
+    }
+
+    let ledger = hem_core::LedgerStore::open(data_dir)?;
+    let remote = client
+        .peer_list_operations(signed_peer_transport_request(
+            PeerListOperationsRequest {
+                after_position: 0,
+                limit: batch_limit,
+                peer_node_id: config.node_id.clone(),
+                use_recorded_cursor: true,
+            },
+            identity,
+            config.cluster_id.as_str(),
+            PEER_METHOD_LIST_OPERATIONS,
+        )?)
+        .await?
+        .into_inner();
+    let pulled_operations = remote.operations.len();
+    if !remote.operations.is_empty() {
+        let envelopes = remote
+            .operations
+            .iter()
+            .cloned()
+            .map(from_proto_ledger_operation)
+            .collect::<Result<Vec<_>, _>>()?;
+        ledger
+            .bootstrap_from_peer_operations(config.cluster_id.as_str(), &envelopes)
+            .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
+        if let Some(last) = remote.operations.last() {
+            client
+                .peer_ack_operations(signed_peer_transport_request(
+                    PeerAckOperationsRequest {
+                        peer_node_id: config.node_id.clone(),
+                        position: last.position,
+                        body_hash_b64: last.body_hash_b64.clone(),
+                    },
+                    identity,
+                    config.cluster_id.as_str(),
+                    PEER_METHOD_ACK_OPERATIONS,
+                )?)
+                .await?;
+        }
+    }
+
+    let peer_cursor = ledger
+        .get_peer_cursor(peer.node_id.as_str())
+        .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?
+        .map(|cursor| cursor.last_position)
+        .unwrap_or(0);
+    let local_batch = ledger
+        .list_after(peer_cursor, batch_limit as usize)
+        .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
+    let pushed_operations = if local_batch.is_empty() {
+        0
+    } else {
+        let last_sent = local_batch.last().cloned();
+        let pushed = client
+            .peer_push_operations(signed_peer_transport_request(
+                PeerPushOperationsRequest {
+                    operations: local_batch.iter().map(to_proto_ledger_operation).collect(),
+                },
+                identity,
+                config.cluster_id.as_str(),
+                PEER_METHOD_PUSH_OPERATIONS,
+            )?)
+            .await?
+            .into_inner();
+        if let Some(last_sent) = last_sent {
+            ledger
+                .record_peer_cursor(
+                    peer.node_id.as_str(),
+                    last_sent.position,
+                    last_sent.body_hash_b64.as_str(),
+                )
+                .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
+        }
+        pushed.accepted_count
+    };
+    let local_latest_position = ledger
+        .latest_position()
+        .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
+    let shared_position = ledger
+        .get_peer_cursor(peer.node_id.as_str())
+        .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?
+        .map(|cursor| cursor.last_position.min(local_latest_position))
+        .unwrap_or(0);
+    let mut checkpoint_id = None;
+    let mut checkpoint_position = None;
+    let mut checkpoint_cosigned = false;
+    if let Some(checkpoint) = ensure_checkpoint_at_position(
+        &ledger,
+        identity,
+        config.cluster_id.as_str(),
+        shared_position,
+    )
+    .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?
+    {
+        let response = client
+            .peer_cosign_checkpoint(signed_peer_transport_request(
+                PeerCosignCheckpointRequest {
+                    requester_node_id: config.node_id.clone(),
+                    requester_public_key: identity.signing_public_key_b64.clone(),
+                    checkpoint: Some(to_proto_checkpoint(&checkpoint)),
+                },
+                identity,
+                config.cluster_id.as_str(),
+                PEER_METHOD_COSIGN_CHECKPOINT,
+            )?)
+            .await?
+            .into_inner();
+        if !response.accepted {
+            return Err(format!(
+                "peer {} rejected checkpoint cosignature: {}",
+                peer.node_id, response.reason
+            )
+            .into());
+        }
+        if response.cluster_id != config.cluster_id {
+            return Err(format!(
+                "checkpoint cosignature cluster_id mismatch expected={} actual={}",
+                config.cluster_id, response.cluster_id
+            )
+            .into());
+        }
+        if response.node_id != peer.node_id {
+            return Err(format!(
+                "checkpoint cosignature node_id mismatch expected={} actual={}",
+                peer.node_id, response.node_id
+            )
+            .into());
+        }
+        let cosignature =
+            from_proto_checkpoint_cosignature(response.cosignature.ok_or_else(|| {
+                "peer checkpoint cosignature response missing cosignature".to_string()
+            })?)?;
+        if cosignature.body.signer_node_id != peer.node_id {
+            return Err(format!(
+                "checkpoint cosignature signer mismatch expected={} actual={}",
+                peer.node_id, cosignature.body.signer_node_id
+            )
+            .into());
+        }
+        if cosignature.signing_public_key_b64 != peer.public_key {
+            return Err(format!(
+                "checkpoint cosignature public key mismatch for peer {}",
+                peer.node_id
+            )
+            .into());
+        }
+        ledger
+            .ingest_checkpoint_cosignature(&cosignature)
+            .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
+        checkpoint_id = Some(checkpoint.body.checkpoint_id.clone());
+        checkpoint_position = Some(checkpoint.body.to_position);
+        checkpoint_cosigned = true;
+    }
+
+    Ok(ClusterPeerSyncReport {
+        accepted: hello.accepted,
+        peer_latest_position: hello.latest_position,
+        pulled_operations,
+        pushed_operations,
+        local_latest_position,
+        checkpoint_id,
+        checkpoint_position,
+        checkpoint_cosigned,
+    })
+}
+
+fn ensure_checkpoint_at_position(
+    ledger: &hem_core::LedgerStore,
+    identity: &NodeIdentity,
+    cluster_id: &str,
+    to_position: i64,
+) -> hem_core::Result<Option<CoreLedgerCheckpoint>> {
+    if to_position < 1 {
+        return Ok(None);
+    }
+    if let Some(existing) = ledger.list_checkpoints()?.into_iter().find(|checkpoint| {
+        checkpoint.body.cluster_id == cluster_id
+            && checkpoint.body.to_position == to_position
+            && checkpoint.signer_node_id == identity.node_id
+            && checkpoint.signing_public_key_b64 == identity.signing_public_key_b64
+    }) {
+        return Ok(Some(existing));
+    }
+    ledger
+        .create_checkpoint(identity, cluster_id, to_position)
+        .map(Some)
+}
+
+fn ensure_latest_cluster_checkpoint(
+    data_dir: &Path,
+    config: &ClusterConfig,
+    identity: &NodeIdentity,
+) -> hem_core::Result<Option<CoreLedgerCheckpoint>> {
+    let ledger = hem_core::LedgerStore::open(data_dir)?;
+    let latest_position = ledger.latest_position()?;
+    ensure_checkpoint_at_position(
+        &ledger,
+        identity,
+        config.cluster_id.as_str(),
+        latest_position,
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -2393,6 +5418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(err) => return Err(Box::new(err) as Box<dyn std::error::Error>),
     };
+    let cluster_runtime = load_cluster_runtime(data_dir.as_path())?;
     let mut mesh = match Mesh::connect("hemd", MeshConfig::from_env().unwrap_or_default()).await {
         Ok(mesh) => Some(Arc::new(mesh)),
         Err(err) => {
@@ -2402,10 +5428,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if cli.once {
+        println!(
+            "hemd_once initialized={} {} data_dir={}",
+            initialized,
+            cluster_runtime.health_status(),
+            data_dir.display()
+        );
         info!(
             bind = %cli.bind,
             data_dir = %data_dir.display(),
             initialized,
+            cluster_enabled = cluster_runtime.enabled,
+            cluster_node_id = cluster_runtime.node_id.as_deref().unwrap_or(""),
+            cluster_peers = cluster_runtime.peer_count,
+            cluster_sync_enabled = cluster_runtime.sync_enabled,
             "hemd bootstrap check complete"
         );
         if let Some(mesh_handle) = mesh.take() {
@@ -2421,16 +5457,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bind = %addr,
         data_dir = %data_dir.display(),
         initialized,
+        cluster_enabled = cluster_runtime.enabled,
+        cluster_node_id = cluster_runtime.node_id.as_deref().unwrap_or(""),
+        cluster_peers = cluster_runtime.peer_count,
+        cluster_sync_enabled = cluster_runtime.sync_enabled,
         "starting hemd"
     );
 
+    let sync_loop = spawn_cluster_sync_loop(data_dir.clone(), &cluster_runtime);
     Server::builder()
         .add_service(HemRuntimeServer::new(HemRuntimeService::new(
             data_dir,
             mesh.clone(),
+            cluster_runtime,
         )))
         .serve(addr)
         .await?;
+    if let Some(sync_loop) = sync_loop {
+        sync_loop.abort();
+        let _ = sync_loop.await;
+    }
 
     if let Some(mesh_handle) = mesh.take() {
         if let Ok(mesh_owned) = Arc::try_unwrap(mesh_handle) {
@@ -2488,5 +5534,29 @@ mod tests {
         }];
         let matches = collect_scan_matches("any text", candidates.as_slice());
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn cluster_sync_settings_disable_with_env_or_offline_mode() {
+        assert!(!ClusterSyncSettings::from_values(true, true, None, None, None,).enabled);
+        assert!(!ClusterSyncSettings::from_values(true, false, Some("0"), None, None,).enabled);
+        assert!(!ClusterSyncSettings::from_values(false, false, Some("1"), None, None,).enabled);
+    }
+
+    #[test]
+    fn cluster_sync_backoff_is_bounded_and_peer_stable() {
+        let settings =
+            ClusterSyncSettings::from_values(true, false, Some("1"), Some("100"), Some("1000"));
+        assert!(settings.enabled);
+        assert_eq!(settings.interval, Duration::from_millis(100));
+        assert_eq!(settings.max_backoff, Duration::from_millis(1000));
+
+        let first = settings.backoff_for_failure("hmn_peer", 1);
+        let second = settings.backoff_for_failure("hmn_peer", 2);
+        let capped = settings.backoff_for_failure("hmn_peer", 20);
+        assert!(first >= Duration::from_millis(100));
+        assert!(second >= first);
+        assert!(capped <= Duration::from_millis(1000));
+        assert_eq!(first, settings.backoff_for_failure("hmn_peer", 1));
     }
 }

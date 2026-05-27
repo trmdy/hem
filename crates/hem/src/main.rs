@@ -7,10 +7,20 @@ use std::{
     io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
+use hem_core::{
+    inspect_data_dir_security, node_statement_hash_b64, peer_transport_auth_statement_bytes,
+    verify_node_statement_signature, ApprovalCredential, AuditEntry as CoreAuditEntry,
+    ClusterConfig, ClusterInvite, CollisionAgreementStatement, HemStore, IssueOfflineLeaseInput,
+    LedgerCollision, LedgerForkReplayInput, LedgerOperation, LedgerOperationBody,
+    LedgerOperationEnvelope, LedgerStore, LedgerValueRewrapInput, LocalApprovalAdapter,
+    LocalStoreLedgerMigrationInput, NodeIdentity, NodeKeyRecipient, OfflineLease, PeerConfig,
+    PlatformBiometricApprovalAdapter, PolicyStore, SecretPolicyTier as CoreSecretPolicyTier,
+};
 use serde::Serialize;
 use tonic::{
     codegen::InterceptedService,
@@ -29,9 +39,11 @@ use proto::{
     DeleteSecretRequest, ExportSecretsRequest, GetAuditLogRequest, GetSecretRequest,
     GrantAccessRequest, HealthRequest, ImportSecretsRequest, InitHemRequest,
     IssueAgentTokenRequest, IssueServiceTokenRequest, ListActiveTokensRequest, ListGrantsRequest,
-    ListPendingApprovalsRequest, ListSecretsRequest, ResolveApprovalRequest, RevokeAccessRequest,
-    RevokeTokenRequest, RotateMasterKeyRequest, ScanForSecretsRequest, ScopeResolutionContext,
-    ScopeSelector, SecretRef, SecretScope, SecretValue, SetSecretRequest,
+    ListPendingApprovalsRequest, ListSecretsRequest, PeerAckOperationsRequest,
+    PeerApproveCollisionRequest, PeerHelloRequest, PeerListOperationsRequest,
+    PeerPushOperationsRequest, ResolveApprovalRequest, RevokeAccessRequest, RevokeTokenRequest,
+    RotateMasterKeyRequest, ScanForSecretsRequest, ScopeResolutionContext, ScopeSelector,
+    SecretRef, SecretScope, SecretValue, SetSecretRequest,
 };
 
 const SECRET_REF_FORMATS: &str =
@@ -39,9 +51,25 @@ const SECRET_REF_FORMATS: &str =
 const AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const DEFAULT_HEM_SUBDIR: &str = ".valhall/hem";
 const DEFAULT_HEM_SYSTEM_DAEMONS_SUBDIR: &str = ".valhall/system-daemons/data/hem";
+const DEFAULT_HEMD_BIND: &str = "127.0.0.1:50091";
 const OPERATOR_TOKEN_FILE: &str = "operator.token";
+const CLUSTER_CONFIG_FILE: &str = "cluster.toml";
+const NODE_IDENTITY_FILE: &str = "node-identity.json";
 const DEFAULT_SCAN_MIN_VALUE_LENGTH: u32 = 8;
 const DEFAULT_SEARCH_LIMIT: u32 = 100;
+const CLUSTER_PEER_CONNECT_TIMEOUT_SECS: u64 = 3;
+const CLUSTER_PEER_RPC_TIMEOUT_SECS: u64 = 10;
+const PEER_TRANSPORT_AUTH_CLUSTER_ID_METADATA_KEY: &str = "x-hem-peer-cluster-id";
+const PEER_TRANSPORT_AUTH_NODE_ID_METADATA_KEY: &str = "x-hem-peer-node-id";
+const PEER_TRANSPORT_AUTH_METHOD_METADATA_KEY: &str = "x-hem-peer-method";
+const PEER_TRANSPORT_AUTH_NONCE_METADATA_KEY: &str = "x-hem-peer-nonce";
+const PEER_TRANSPORT_AUTH_TIMESTAMP_METADATA_KEY: &str = "x-hem-peer-timestamp";
+const PEER_TRANSPORT_AUTH_SIGNATURE_METADATA_KEY: &str = "x-hem-peer-signature";
+const PEER_METHOD_APPROVE_COLLISION: &str = "PeerApproveCollision";
+const PEER_METHOD_HELLO: &str = "PeerHello";
+const PEER_METHOD_LIST_OPERATIONS: &str = "PeerListOperations";
+const PEER_METHOD_PUSH_OPERATIONS: &str = "PeerPushOperations";
+const PEER_METHOD_ACK_OPERATIONS: &str = "PeerAckOperations";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -227,6 +255,11 @@ enum Commands {
     )]
     Approve {
         request_id: String,
+        #[arg(
+            long,
+            help = "Require local platform biometric approval before resolving the request"
+        )]
+        biometric: bool,
         #[arg(long, default_value = "hem-cli")]
         actor: String,
         #[arg(long, default_value = "")]
@@ -244,10 +277,34 @@ enum Commands {
         #[arg(long, default_value = "")]
         message: String,
     },
+    #[command(
+        about = "Manage local read policy tiers",
+        after_help = "Examples:\n  hem policy list\n  hem policy get --secret global/openai-prod\n  hem policy set peer_quorum --scope global\n  hem policy set master_biometric --secret global/root-token"
+    )]
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommands,
+    },
+    #[command(
+        about = "Issue, list, consume, and revoke local offline leases",
+        after_help = "Examples:\n  hem lease issue global/openai-prod --requester token:abc --node-id hmn_local --uses 2 --ttl-seconds 600\n  hem lease list\n  hem lease revoke hol_..."
+    )]
+    Lease {
+        #[command(subcommand)]
+        command: LeaseCommands,
+    },
     #[command(about = "Issue/list/revoke Hem access tokens", visible_alias = "t")]
     Token {
         #[command(subcommand)]
         command: TokenCommands,
+    },
+    #[command(
+        about = "Manage standalone Hem cluster configuration",
+        after_help = "These commands operate on local Hem data files and do not require hemd to be running.\n\nExamples:\n  hem cluster init --node-id hmn_local --listen 127.0.0.1:50191 --quorum 1\n  hem cluster status\n  hem cluster peers"
+    )]
+    Cluster {
+        #[command(subcommand)]
+        command: ClusterCommands,
     },
     #[command(
         about = "Grant explicit cross-scope access to a secret",
@@ -349,6 +406,61 @@ enum Commands {
 }
 
 #[derive(Debug, Subcommand)]
+enum PolicyCommands {
+    #[command(about = "List configured default, scope, and secret policy tiers")]
+    List,
+    #[command(about = "Get the effective policy for default, scope, or secret")]
+    Get {
+        #[arg(long, conflicts_with = "secret")]
+        scope: Option<String>,
+        #[arg(long, conflicts_with = "scope")]
+        secret: Option<String>,
+    },
+    #[command(about = "Set policy tier for default, scope, or secret")]
+    Set {
+        tier: String,
+        #[arg(long, conflicts_with = "secret")]
+        scope: Option<String>,
+        #[arg(long, conflicts_with = "scope")]
+        secret: Option<String>,
+        #[arg(long, help = "Required when lowering the effective policy tier")]
+        allow_downgrade: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LeaseCommands {
+    #[command(about = "Issue an offline lease bound to a secret, requester, and node")]
+    Issue {
+        secret: String,
+        #[arg(long)]
+        requester: String,
+        #[arg(long)]
+        node_id: String,
+        #[arg(long, default_value_t = 1)]
+        uses: u32,
+        #[arg(long, default_value_t = 600)]
+        ttl_seconds: i64,
+    },
+    #[command(about = "List offline leases")]
+    List,
+    #[command(about = "Consume one offline lease use")]
+    Consume {
+        secret: String,
+        #[arg(long)]
+        requester: String,
+        #[arg(long)]
+        node_id: String,
+    },
+    #[command(about = "Revoke an offline lease")]
+    Revoke {
+        lease_id: String,
+        #[arg(long, default_value = "hem-cli")]
+        actor: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum TokenCommands {
     #[command(about = "Issue a service token", visible_aliases = ["is", "service"])]
     IssueService {
@@ -387,6 +499,193 @@ enum TokenCommands {
         token_id: String,
         #[arg(long, default_value = "hem-cli")]
         actor: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ClusterCommands {
+    #[command(about = "Initialize standalone cluster config and node identity")]
+    Init {
+        #[arg(long)]
+        node_id: String,
+        #[arg(long)]
+        listen: String,
+        #[arg(long, default_value_t = 1)]
+        quorum: u16,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        master_node_id: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
+    #[command(about = "Print local cluster config status")]
+    Status,
+    #[command(about = "Print machine-readable cluster health, lag, and risk status")]
+    Health,
+    #[command(about = "List static cluster peers from local config")]
+    Peers,
+    #[command(about = "Create a signed invite for another Hem node")]
+    Invite {
+        #[arg(long, default_value_t = 3600)]
+        ttl_seconds: u64,
+    },
+    #[command(about = "Manage static cluster peers")]
+    Peer {
+        #[command(subcommand)]
+        command: ClusterPeerCommands,
+    },
+    #[command(about = "Synchronize distributed ledger operations with configured peers")]
+    Sync {
+        #[arg(long)]
+        once: bool,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long, default_value_t = 1000)]
+        limit: u32,
+    },
+    #[command(about = "Bootstrap local ledger history from a configured peer")]
+    BootstrapLedger {
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long, default_value_t = 1000)]
+        limit: u32,
+    },
+    #[command(about = "Install hem/hemd from a release artifact and write supervisor files")]
+    Install {
+        #[arg(long)]
+        artifact_dir: String,
+        #[arg(long)]
+        prefix: String,
+        #[arg(long)]
+        data_dir: String,
+        #[arg(long, default_value = DEFAULT_HEMD_BIND)]
+        bind: String,
+        #[arg(long, value_enum, default_value_t = ClusterSupervisorKind::Launchd)]
+        supervisor: ClusterSupervisorKind,
+        #[arg(long)]
+        force: bool,
+    },
+    #[command(about = "Rebuild an existing hem/hemd install from a release artifact with backup")]
+    Rebuild {
+        #[arg(long)]
+        artifact_dir: String,
+        #[arg(long)]
+        prefix: String,
+        #[arg(long)]
+        data_dir: String,
+        #[arg(long, default_value = DEFAULT_HEMD_BIND)]
+        bind: String,
+        #[arg(long, value_enum, default_value_t = ClusterSupervisorKind::Launchd)]
+        supervisor: ClusterSupervisorKind,
+        #[arg(long)]
+        backup_dir: String,
+    },
+    #[command(about = "Migrate existing local Hem secrets into the distributed ledger")]
+    Migrate {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    #[command(about = "Rewrap decryptable latest ledger values to all configured node keys")]
+    RewrapValues {
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long, default_value = "hem-cli")]
+        actor: String,
+    },
+    #[command(about = "Verify local distributed ledger integrity")]
+    Verify {
+        #[arg(long)]
+        repair: bool,
+    },
+    #[command(about = "Declare an explicit hard fork from a parent checkpoint")]
+    Fork {
+        #[arg(long)]
+        parent_checkpoint: Option<String>,
+        #[arg(long, default_value = "hem-cli")]
+        actor: String,
+        #[arg(long)]
+        reason: String,
+    },
+    #[command(about = "Execute a hard-fork materializer rewind and replay")]
+    ReplayFork {
+        fork_id: String,
+        #[arg(long)]
+        confirm_rewind: Option<String>,
+        #[arg(long)]
+        backup_confirmed: Option<String>,
+        #[arg(long, default_value = "hem-cli")]
+        actor: String,
+    },
+    #[command(about = "List unresolved distributed secret write collisions")]
+    Collisions,
+    #[command(about = "Append a signed collision resolution operation")]
+    ResolveCollision {
+        collision_id: String,
+        #[arg(long, default_value = "keep-current")]
+        resolution: String,
+        #[arg(long, default_value = "hem-cli")]
+        actor: String,
+        #[arg(long)]
+        allow_local: bool,
+    },
+    #[command(about = "Accept a cluster invite placeholder for the standalone flow")]
+    Join {
+        #[arg(value_name = "INVITE")]
+        invite: String,
+        #[arg(long)]
+        node_id: Option<String>,
+        #[arg(long)]
+        listen: Option<String>,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ClusterSupervisorKind {
+    Launchd,
+    Systemd,
+    None,
+}
+
+impl ClusterSupervisorKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Launchd => "launchd",
+            Self::Systemd => "systemd",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum ClusterPeerCommands {
+    Add {
+        #[arg(long)]
+        node_id: String,
+        #[arg(long)]
+        endpoint: String,
+        #[arg(long)]
+        public_key: String,
+        #[arg(long)]
+        wrap_public_key: Option<String>,
+    },
+    Update {
+        node_id: String,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        public_key: Option<String>,
+        #[arg(long)]
+        wrap_public_key: Option<String>,
+    },
+    Remove {
+        node_id: String,
     },
 }
 
@@ -431,6 +730,15 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
     if let Commands::Usage = &cli.command {
         print_usage();
         return Ok(0);
+    }
+    if let Commands::Cluster { command } = cli.command {
+        return run_cluster_command(command).await;
+    }
+    if let Commands::Policy { command } = cli.command {
+        return run_policy_command(command);
+    }
+    if let Commands::Lease { command } = cli.command {
+        return run_lease_command(command);
     }
 
     let endpoint = daemon_endpoint(cli.endpoint);
@@ -806,10 +1114,15 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
         }
         Commands::Approve {
             request_id,
+            biometric,
             actor,
             message,
         } => {
-            confirm_human_approval(request_id.as_str(), true)?;
+            if biometric {
+                confirm_biometric_approval(&mut client, request_id.as_str()).await?;
+            } else {
+                confirm_human_approval(request_id.as_str(), true)?;
+            }
             let response = client
                 .approve_access(ResolveApprovalRequest {
                     request_id,
@@ -1123,12 +1436,2171 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
             print_kv("new_key_id", response.new_key_id);
             print_kv("rotated_secret_count", response.rotated_secret_count);
         }
-        Commands::Examples { .. } | Commands::Usage => {
-            unreachable!("usage/examples command is handled before daemon connect")
+        Commands::Examples { .. }
+        | Commands::Usage
+        | Commands::Cluster { .. }
+        | Commands::Policy { .. }
+        | Commands::Lease { .. } => {
+            unreachable!("local command is handled before daemon connect")
         }
     }
 
     Ok(0)
+}
+
+async fn run_cluster_command(command: ClusterCommands) -> Result<i32, Box<dyn std::error::Error>> {
+    match command {
+        ClusterCommands::Init {
+            node_id,
+            listen,
+            quorum,
+            label,
+            master_node_id,
+            force,
+        } => run_cluster_init(node_id, listen, quorum, label, master_node_id, force),
+        ClusterCommands::Status => run_cluster_status(),
+        ClusterCommands::Health => run_cluster_health(),
+        ClusterCommands::Peers => run_cluster_peers(),
+        ClusterCommands::Invite { ttl_seconds } => run_cluster_invite(ttl_seconds),
+        ClusterCommands::Peer { command } => run_cluster_peer_command(command),
+        ClusterCommands::Sync {
+            once,
+            dry_run,
+            peer,
+            limit,
+        } => run_cluster_sync(once, dry_run, peer, limit).await,
+        ClusterCommands::BootstrapLedger { peer, limit } => {
+            run_cluster_bootstrap_ledger(peer, limit).await
+        }
+        ClusterCommands::Install {
+            artifact_dir,
+            prefix,
+            data_dir,
+            bind,
+            supervisor,
+            force,
+        } => run_cluster_install(
+            ClusterInstallMode::Install,
+            artifact_dir,
+            prefix,
+            data_dir,
+            bind,
+            supervisor,
+            force,
+            None,
+        ),
+        ClusterCommands::Rebuild {
+            artifact_dir,
+            prefix,
+            data_dir,
+            bind,
+            supervisor,
+            backup_dir,
+        } => run_cluster_install(
+            ClusterInstallMode::Rebuild,
+            artifact_dir,
+            prefix,
+            data_dir,
+            bind,
+            supervisor,
+            true,
+            Some(backup_dir),
+        ),
+        ClusterCommands::Migrate { dry_run } => run_cluster_migrate(dry_run),
+        ClusterCommands::RewrapValues { dry_run, actor } => {
+            run_cluster_rewrap_values(dry_run, actor)
+        }
+        ClusterCommands::Verify { repair } => run_cluster_verify(repair),
+        ClusterCommands::Fork {
+            parent_checkpoint,
+            actor,
+            reason,
+        } => run_cluster_fork(parent_checkpoint, actor, reason),
+        ClusterCommands::ReplayFork {
+            fork_id,
+            confirm_rewind,
+            backup_confirmed,
+            actor,
+        } => run_cluster_replay_fork(fork_id, confirm_rewind, backup_confirmed, actor),
+        ClusterCommands::Collisions => run_cluster_collisions(),
+        ClusterCommands::ResolveCollision {
+            collision_id,
+            resolution,
+            actor,
+            allow_local,
+        } => run_cluster_resolve_collision(collision_id, resolution, actor, allow_local).await,
+        ClusterCommands::Join {
+            invite,
+            node_id,
+            listen,
+            label,
+            force,
+        } => run_cluster_join(invite, node_id, listen, label, force),
+    }
+}
+
+fn run_cluster_invite(ttl_seconds: u64) -> Result<i32, Box<dyn std::error::Error>> {
+    if ttl_seconds == 0 {
+        return Err("invite ttl-seconds must be greater than 0".into());
+    }
+    let data_dir = resolve_primary_data_dir();
+    let config = ClusterConfig::load(data_dir.join(CLUSTER_CONFIG_FILE).as_path())?;
+    let identity = NodeIdentity::load(data_dir.join(NODE_IDENTITY_FILE).as_path())?;
+    let invite = ClusterInvite::create(&config, &identity, ttl_seconds)?;
+    let token = invite.encode()?;
+
+    print_cluster_kv("invite_created", true);
+    print_cluster_kv("cluster_id", config.cluster_id.as_str());
+    print_cluster_kv("node_id", config.node_id.as_str());
+    print_cluster_kv("endpoint", config.listen.as_str());
+    if let Some(wrap_public_key) = identity.wrap_public_key_b64.as_ref() {
+        print_cluster_kv("wrap_public_key", wrap_public_key.as_str());
+    }
+    print_cluster_kv("expires_at", invite.body.expires_at.to_rfc3339());
+    print_cluster_kv("invite", token.as_str());
+    Ok(0)
+}
+
+fn run_cluster_join(
+    invite: String,
+    node_id: Option<String>,
+    listen: Option<String>,
+    label: Option<String>,
+    force: bool,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let invite = ClusterInvite::decode(invite.as_str())?;
+    let node_id =
+        normalize_optional_string(node_id.ok_or("cluster join requires --node-id for this node")?)
+            .ok_or("cluster join --node-id must not be empty")?;
+    let listen =
+        normalize_optional_string(listen.ok_or("cluster join requires --listen for this node")?)
+            .ok_or("cluster join --listen must not be empty")?;
+    if node_id == invite.body.inviter_node_id {
+        return Err("cluster join node_id must not match inviter node id".into());
+    }
+
+    let data_dir = resolve_primary_data_dir();
+    let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
+    let identity_path = data_dir.join(NODE_IDENTITY_FILE);
+    if !force && (config_path.exists() || identity_path.exists()) {
+        return Err(format!(
+            "cluster files already exist in {}; pass --force to replace cluster.toml and node-identity.json",
+            data_dir.display()
+        )
+        .into());
+    }
+
+    fs::create_dir_all(data_dir.as_path())?;
+    let config = ClusterConfig {
+        enabled: true,
+        cluster_id: invite.body.cluster_id.clone(),
+        node_id: node_id.clone(),
+        listen,
+        quorum: invite.body.quorum,
+        master_node_id: invite.body.master_node_id.clone(),
+        peers: vec![invite.peer_config()],
+    };
+    let identity = NodeIdentity::generate(node_id.as_str(), label.unwrap_or_default().as_str())?;
+    config.save(config_path.as_path())?;
+    identity.save(identity_path.as_path())?;
+
+    print_cluster_kv("cluster_joined", true);
+    print_cluster_kv("data_dir", data_dir.display());
+    print_cluster_kv("cluster_id", config.cluster_id.as_str());
+    print_cluster_kv("node_id", config.node_id.as_str());
+    print_cluster_kv("listen", config.listen.as_str());
+    print_cluster_kv("peer_node_id", config.peers[0].node_id.as_str());
+    print_cluster_kv("peer_endpoint", config.peers[0].endpoint.as_str());
+    print_cluster_kv(
+        "peer_wrap_public_key",
+        config.peers[0].wrap_public_key.as_deref().unwrap_or(""),
+    );
+    Ok(0)
+}
+
+fn run_cluster_peer_command(
+    command: ClusterPeerCommands,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let data_dir = resolve_primary_data_dir();
+    let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
+    let mut config = ClusterConfig::load(config_path.as_path())?;
+
+    match command {
+        ClusterPeerCommands::Add {
+            node_id,
+            endpoint,
+            public_key,
+            wrap_public_key,
+        } => {
+            let peer = PeerConfig {
+                node_id,
+                endpoint,
+                public_key,
+                wrap_public_key,
+            };
+            peer.validate()?;
+            if peer.node_id == config.node_id {
+                return Err("peer node_id must not match local node_id".into());
+            }
+            if config.peers.iter().any(|item| item.node_id == peer.node_id) {
+                return Err(format!("peer already exists: {}", peer.node_id).into());
+            }
+            config.peers.push(peer.clone());
+            config.save(config_path.as_path())?;
+            print_cluster_kv("peer_added", true);
+            print_cluster_peer(&peer);
+        }
+        ClusterPeerCommands::Update {
+            node_id,
+            endpoint,
+            public_key,
+            wrap_public_key,
+        } => {
+            let Some(peer) = config.peers.iter_mut().find(|item| item.node_id == node_id) else {
+                return Err(format!("peer not found: {node_id}").into());
+            };
+            if let Some(endpoint) = endpoint {
+                peer.endpoint = endpoint;
+            }
+            if let Some(public_key) = public_key {
+                peer.public_key = public_key;
+            }
+            if let Some(wrap_public_key) = wrap_public_key {
+                peer.wrap_public_key = Some(wrap_public_key);
+            }
+            peer.validate()?;
+            let updated = peer.clone();
+            config.save(config_path.as_path())?;
+            print_cluster_kv("peer_updated", true);
+            print_cluster_peer(&updated);
+        }
+        ClusterPeerCommands::Remove { node_id } => {
+            let before = config.peers.len();
+            config.peers.retain(|peer| peer.node_id != node_id);
+            if config.peers.len() == before {
+                return Err(format!("peer not found: {node_id}").into());
+            }
+            config.save(config_path.as_path())?;
+            print_cluster_kv("peer_removed", true);
+            print_cluster_kv("peer_node_id", node_id.as_str());
+        }
+    }
+    Ok(0)
+}
+
+async fn run_cluster_sync(
+    once: bool,
+    dry_run: bool,
+    peer_filter: Option<String>,
+    limit: u32,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    if !once {
+        return Err("cluster sync currently supports only --once".into());
+    }
+    if limit == 0 {
+        return Err("cluster sync --limit must be greater than 0".into());
+    }
+
+    let data_dir = resolve_primary_data_dir();
+    let config = ClusterConfig::load(data_dir.join(CLUSTER_CONFIG_FILE).as_path())?;
+    let identity = NodeIdentity::load(data_dir.join(NODE_IDENTITY_FILE).as_path())?;
+    if identity.node_id != config.node_id {
+        return Err(format!(
+            "node identity mismatch: config node_id={} identity node_id={}",
+            config.node_id, identity.node_id
+        )
+        .into());
+    }
+    let ledger = LedgerStore::open(data_dir.as_path())?;
+    let peers: Vec<PeerConfig> = config
+        .peers
+        .iter()
+        .filter(|peer| {
+            peer_filter
+                .as_ref()
+                .map(|filter| filter == &peer.node_id)
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+    if peer_filter.is_some() && peers.is_empty() {
+        return Err("cluster sync peer filter matched no configured peers".into());
+    }
+
+    print_cluster_kv("sync_once", true);
+    print_cluster_kv("sync_dry_run", dry_run);
+    print_cluster_kv("sync_peers", peers.len());
+
+    for peer in peers {
+        let report = sync_peer_once(&config, &identity, &ledger, &peer, dry_run, limit).await?;
+        print_cluster_kv("peer_node_id", peer.node_id.as_str());
+        print_cluster_kv("peer_endpoint", peer.endpoint.as_str());
+        print_cluster_kv("peer_accepted", report.accepted);
+        print_cluster_kv("peer_latest_position", report.peer_latest_position);
+        print_cluster_kv("pulled_operations", report.pulled_operations);
+        print_cluster_kv("duplicate_operations", report.duplicate_operations);
+        print_cluster_kv("materialized_records", report.materialized_records);
+        print_cluster_kv("pushed_operations", report.pushed_operations);
+        print_cluster_kv("local_latest_position", report.local_latest_position);
+    }
+    Ok(0)
+}
+
+async fn run_cluster_bootstrap_ledger(
+    peer_filter: Option<String>,
+    limit: u32,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    if limit == 0 {
+        return Err("cluster bootstrap-ledger --limit must be greater than 0".into());
+    }
+
+    let data_dir = resolve_primary_data_dir();
+    let config = ClusterConfig::load(data_dir.join(CLUSTER_CONFIG_FILE).as_path())?;
+    let identity = NodeIdentity::load(data_dir.join(NODE_IDENTITY_FILE).as_path())?;
+    if identity.node_id != config.node_id {
+        return Err(format!(
+            "node identity mismatch: config node_id={} identity node_id={}",
+            config.node_id, identity.node_id
+        )
+        .into());
+    }
+    let ledger = LedgerStore::open(data_dir.as_path())?;
+    let peers: Vec<PeerConfig> = config
+        .peers
+        .iter()
+        .filter(|peer| {
+            peer_filter
+                .as_ref()
+                .map(|filter| filter == &peer.node_id)
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+    if peer_filter.is_some() && peers.is_empty() {
+        return Err("cluster bootstrap-ledger peer filter matched no configured peers".into());
+    }
+
+    print_cluster_kv("bootstrap_ledger", true);
+    print_cluster_kv("bootstrap_peers", peers.len());
+    for peer in peers {
+        let report = bootstrap_peer_ledger(&config, &identity, &ledger, &peer, limit).await?;
+        print_cluster_kv("peer_node_id", peer.node_id.as_str());
+        print_cluster_kv("peer_endpoint", peer.endpoint.as_str());
+        print_cluster_kv("peer_accepted", report.accepted);
+        print_cluster_kv("peer_latest_position", report.peer_latest_position);
+        print_cluster_kv("pulled_operations", report.pulled_operations);
+        print_cluster_kv("duplicate_operations", report.duplicate_operations);
+        print_cluster_kv("materialized_records", report.materialized_records);
+        print_cluster_kv("local_latest_position", report.local_latest_position);
+    }
+    Ok(0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClusterInstallMode {
+    Install,
+    Rebuild,
+}
+
+impl ClusterInstallMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Rebuild => "rebuild",
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_cluster_install(
+    mode: ClusterInstallMode,
+    artifact_dir: String,
+    prefix: String,
+    data_dir: String,
+    bind: String,
+    supervisor: ClusterSupervisorKind,
+    force: bool,
+    backup_dir: Option<String>,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let artifact_dir = PathBuf::from(artifact_dir);
+    let prefix = PathBuf::from(prefix);
+    let data_dir = PathBuf::from(data_dir);
+    let bin_dir = prefix.join("bin");
+    let etc_dir = prefix.join("etc/hem");
+    let supervisor_dir = prefix.join("supervisor");
+    let env_file = etc_dir.join("hemd.env");
+    let manifest_path = etc_dir.join("install-manifest.json");
+    let supervisor_file = supervisor_file_path(supervisor, supervisor_dir.as_path());
+    let backup_dir = match (mode, backup_dir) {
+        (ClusterInstallMode::Rebuild, Some(path)) => Some(PathBuf::from(path)),
+        (ClusterInstallMode::Rebuild, None) => {
+            return Err("cluster rebuild requires --backup-dir".into());
+        }
+        (ClusterInstallMode::Install, Some(path)) => Some(PathBuf::from(path)),
+        (ClusterInstallMode::Install, None) => None,
+    };
+
+    if !artifact_dir.is_dir() {
+        return Err(format!("artifact dir does not exist: {}", artifact_dir.display()).into());
+    }
+    fs::create_dir_all(bin_dir.as_path())?;
+    fs::create_dir_all(etc_dir.as_path())?;
+    fs::create_dir_all(data_dir.as_path())?;
+    if supervisor != ClusterSupervisorKind::None {
+        fs::create_dir_all(supervisor_dir.as_path())?;
+    }
+    if let Some(backup_dir) = backup_dir.as_ref() {
+        fs::create_dir_all(backup_dir.as_path())?;
+        backup_file_if_exists(
+            bin_dir.join("hem").as_path(),
+            backup_dir.join("hem").as_path(),
+        )?;
+        backup_file_if_exists(
+            bin_dir.join("hemd").as_path(),
+            backup_dir.join("hemd").as_path(),
+        )?;
+        backup_file_if_exists(env_file.as_path(), backup_dir.join("hemd.env").as_path())?;
+        if let Some(supervisor_file) = supervisor_file.as_ref() {
+            let backup_name = supervisor_file
+                .file_name()
+                .ok_or("supervisor file has no file name")?;
+            backup_file_if_exists(
+                supervisor_file.as_path(),
+                backup_dir.join(backup_name).as_path(),
+            )?;
+        }
+        backup_file_if_exists(
+            manifest_path.as_path(),
+            backup_dir.join("install-manifest.json").as_path(),
+        )?;
+    }
+
+    let overwrite = force || mode == ClusterInstallMode::Rebuild;
+    let hem_bin =
+        install_artifact_binary(artifact_dir.as_path(), bin_dir.as_path(), "hem", overwrite)?;
+    let hemd_bin =
+        install_artifact_binary(artifact_dir.as_path(), bin_dir.as_path(), "hemd", overwrite)?;
+    let endpoint = format!("http://{bind}");
+    let env_body = render_hemd_env(data_dir.as_path(), endpoint.as_str());
+    write_checked(env_file.as_path(), env_body.as_bytes(), overwrite)?;
+    if let Some(supervisor_file) = supervisor_file.as_ref() {
+        let body = render_supervisor_file(
+            supervisor,
+            hemd_bin.as_path(),
+            data_dir.as_path(),
+            bind.as_str(),
+            env_file.as_path(),
+        )?;
+        write_checked(supervisor_file.as_path(), body.as_bytes(), overwrite)?;
+    }
+
+    let manifest = serde_json::json!({
+        "mode": mode.as_str(),
+        "installed_at": Utc::now().to_rfc3339(),
+        "artifact_dir": artifact_dir.display().to_string(),
+        "prefix": prefix.display().to_string(),
+        "data_dir": data_dir.display().to_string(),
+        "bind": bind.as_str(),
+        "endpoint": endpoint.as_str(),
+        "hem_bin": hem_bin.display().to_string(),
+        "hemd_bin": hemd_bin.display().to_string(),
+        "env_file": env_file.display().to_string(),
+        "supervisor_kind": supervisor.as_str(),
+        "supervisor_file": supervisor_file
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        "backup_dir": backup_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        "package_version": env!("CARGO_PKG_VERSION"),
+    });
+    let manifest_body = serde_json::to_vec_pretty(&manifest)?;
+    write_checked(manifest_path.as_path(), manifest_body.as_slice(), overwrite)?;
+
+    print_cluster_kv("cluster_installed", true);
+    print_cluster_kv("install_mode", mode.as_str());
+    print_cluster_kv("artifact_dir", artifact_dir.display());
+    print_cluster_kv("install_prefix", prefix.display());
+    print_cluster_kv("hem_bin", hem_bin.display());
+    print_cluster_kv("hemd_bin", hemd_bin.display());
+    print_cluster_kv("data_dir", data_dir.display());
+    print_cluster_kv("bind", bind.as_str());
+    print_cluster_kv("endpoint", endpoint.as_str());
+    print_cluster_kv("env_file", env_file.display());
+    print_cluster_kv("supervisor_kind", supervisor.as_str());
+    if let Some(supervisor_file) = supervisor_file.as_ref() {
+        print_cluster_kv("supervisor_file", supervisor_file.display());
+    }
+    if let Some(backup_dir) = backup_dir.as_ref() {
+        print_cluster_kv("backup_dir", backup_dir.display());
+    }
+    print_cluster_kv("install_manifest", manifest_path.display());
+    print_cluster_kv(
+        "verify_version_command",
+        format!("{} --version", hem_bin.display()),
+    );
+    print_cluster_kv(
+        "verify_health_command",
+        format!("{} --endpoint {} health", hem_bin.display(), endpoint),
+    );
+    print_cluster_kv(
+        "verify_cluster_status_command",
+        format!(
+            "HEM_DATA_DIR={} {} cluster status",
+            data_dir.display(),
+            hem_bin.display()
+        ),
+    );
+    print_cluster_kv(
+        "verify_ledger_command",
+        format!(
+            "HEM_DATA_DIR={} {} cluster verify",
+            data_dir.display(),
+            hem_bin.display()
+        ),
+    );
+    Ok(0)
+}
+
+fn supervisor_file_path(
+    supervisor: ClusterSupervisorKind,
+    supervisor_dir: &Path,
+) -> Option<PathBuf> {
+    match supervisor {
+        ClusterSupervisorKind::Launchd => Some(supervisor_dir.join("io.valhall.hemd.plist")),
+        ClusterSupervisorKind::Systemd => Some(supervisor_dir.join("hemd.service")),
+        ClusterSupervisorKind::None => None,
+    }
+}
+
+fn install_artifact_binary(
+    artifact_dir: &Path,
+    bin_dir: &Path,
+    name: &str,
+    overwrite: bool,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let source = artifact_dir.join(name);
+    if !source.is_file() {
+        return Err(format!("release artifact is missing binary: {}", source.display()).into());
+    }
+    let destination = bin_dir.join(name);
+    if destination.exists() && !overwrite {
+        return Err(format!(
+            "install target already exists: {}; pass --force or use cluster rebuild",
+            destination.display()
+        )
+        .into());
+    }
+    fs::copy(source.as_path(), destination.as_path())?;
+    set_executable_permissions(destination.as_path())?;
+    Ok(destination)
+}
+
+fn backup_file_if_exists(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if source.exists() {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(source, destination)?;
+    }
+    Ok(())
+}
+
+fn write_checked(
+    path: &Path,
+    bytes: &[u8],
+    overwrite: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if path.exists() && !overwrite {
+        return Err(format!(
+            "install target already exists: {}; pass --force or use cluster rebuild",
+            path.display()
+        )
+        .into());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
+fn set_executable_permissions(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+fn render_hemd_env(data_dir: &Path, endpoint: &str) -> String {
+    format!(
+        "HEM_DATA_DIR={}\nVALHALL_HEMD_ENDPOINT={endpoint}\n",
+        data_dir.display()
+    )
+}
+
+fn render_supervisor_file(
+    supervisor: ClusterSupervisorKind,
+    hemd_bin: &Path,
+    data_dir: &Path,
+    bind: &str,
+    env_file: &Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match supervisor {
+        ClusterSupervisorKind::Launchd => Ok(render_launchd_plist(hemd_bin, data_dir, bind)),
+        ClusterSupervisorKind::Systemd => {
+            Ok(render_systemd_unit(hemd_bin, data_dir, bind, env_file))
+        }
+        ClusterSupervisorKind::None => Err("supervisor file requested for supervisor=none".into()),
+    }
+}
+
+fn render_launchd_plist(hemd_bin: &Path, data_dir: &Path, bind: &str) -> String {
+    let hemd_bin = xml_escape(hemd_bin.to_string_lossy().as_ref());
+    let data_dir = xml_escape(data_dir.to_string_lossy().as_ref());
+    let bind = xml_escape(bind);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.valhall.hemd</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{hemd_bin}</string>
+    <string>--bind</string>
+    <string>{bind}</string>
+    <string>--data-dir</string>
+    <string>{data_dir}</string>
+  </array>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>{data_dir}/hemd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>{data_dir}/hemd.err.log</string>
+</dict>
+</plist>
+"#
+    )
+}
+
+fn render_systemd_unit(hemd_bin: &Path, data_dir: &Path, bind: &str, env_file: &Path) -> String {
+    format!(
+        "[Unit]\nDescription=Valhall Hem daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nEnvironmentFile={}\nExecStart={} --bind {} --data-dir {}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n",
+        env_file.display(),
+        hemd_bin.display(),
+        bind,
+        data_dir.display()
+    )
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[derive(Debug)]
+struct ClusterPeerSyncReport {
+    accepted: bool,
+    peer_latest_position: i64,
+    pulled_operations: usize,
+    duplicate_operations: usize,
+    materialized_records: usize,
+    pushed_operations: u32,
+    local_latest_position: i64,
+}
+
+async fn bootstrap_peer_ledger(
+    config: &ClusterConfig,
+    identity: &NodeIdentity,
+    ledger: &LedgerStore,
+    peer: &PeerConfig,
+    limit: u32,
+) -> Result<ClusterPeerSyncReport, Box<dyn std::error::Error>> {
+    let mut client = connect_client(peer.endpoint.as_str(), None).await?;
+    let hello = client
+        .peer_hello(signed_peer_transport_request(
+            PeerHelloRequest {
+                cluster_id: config.cluster_id.clone(),
+                node_id: config.node_id.clone(),
+                public_key: identity.signing_public_key_b64.clone(),
+            },
+            identity,
+            config.cluster_id.as_str(),
+            PEER_METHOD_HELLO,
+        )?)
+        .await?
+        .into_inner();
+    if hello.node_id != peer.node_id {
+        return Err(format!(
+            "peer hello node_id mismatch expected={} actual={}",
+            peer.node_id, hello.node_id
+        )
+        .into());
+    }
+    if hello.cluster_id != config.cluster_id {
+        return Err(format!(
+            "peer hello cluster_id mismatch expected={} actual={}",
+            config.cluster_id, hello.cluster_id
+        )
+        .into());
+    }
+
+    let mut pulled_operations = 0_usize;
+    let mut duplicate_operations = 0_usize;
+    let mut materialized_records = 0_usize;
+    loop {
+        let after_position = ledger.latest_position()?;
+        let remote = client
+            .peer_list_operations(signed_peer_transport_request(
+                PeerListOperationsRequest {
+                    after_position,
+                    limit,
+                    peer_node_id: String::new(),
+                    use_recorded_cursor: false,
+                },
+                identity,
+                config.cluster_id.as_str(),
+                PEER_METHOD_LIST_OPERATIONS,
+            )?)
+            .await?
+            .into_inner();
+        if remote.operations.is_empty() {
+            return Ok(ClusterPeerSyncReport {
+                accepted: hello.accepted,
+                peer_latest_position: remote.latest_position,
+                pulled_operations,
+                duplicate_operations,
+                materialized_records,
+                pushed_operations: 0,
+                local_latest_position: ledger.latest_position()?,
+            });
+        }
+
+        let envelopes = remote
+            .operations
+            .iter()
+            .cloned()
+            .map(core_envelope_from_proto)
+            .collect::<Result<Vec<_>, _>>()?;
+        let imported =
+            ledger.bootstrap_from_peer_operations(config.cluster_id.as_str(), &envelopes)?;
+        pulled_operations += remote.operations.len();
+        duplicate_operations += imported.duplicate_operations;
+        materialized_records += imported.materialized_records;
+        if let Some(last) = remote.operations.last() {
+            client
+                .peer_ack_operations(signed_peer_transport_request(
+                    PeerAckOperationsRequest {
+                        peer_node_id: config.node_id.clone(),
+                        position: last.position,
+                        body_hash_b64: last.body_hash_b64.clone(),
+                    },
+                    identity,
+                    config.cluster_id.as_str(),
+                    PEER_METHOD_ACK_OPERATIONS,
+                )?)
+                .await?;
+        }
+        if remote.operations.len() < limit as usize
+            || imported.latest_position >= remote.latest_position
+        {
+            return Ok(ClusterPeerSyncReport {
+                accepted: hello.accepted,
+                peer_latest_position: remote.latest_position,
+                pulled_operations,
+                duplicate_operations,
+                materialized_records,
+                pushed_operations: 0,
+                local_latest_position: imported.latest_position,
+            });
+        }
+    }
+}
+
+async fn sync_peer_once(
+    config: &ClusterConfig,
+    identity: &NodeIdentity,
+    ledger: &LedgerStore,
+    peer: &PeerConfig,
+    dry_run: bool,
+    limit: u32,
+) -> Result<ClusterPeerSyncReport, Box<dyn std::error::Error>> {
+    let mut client = connect_client(peer.endpoint.as_str(), None).await?;
+    let hello = client
+        .peer_hello(signed_peer_transport_request(
+            PeerHelloRequest {
+                cluster_id: config.cluster_id.clone(),
+                node_id: config.node_id.clone(),
+                public_key: identity.signing_public_key_b64.clone(),
+            },
+            identity,
+            config.cluster_id.as_str(),
+            PEER_METHOD_HELLO,
+        )?)
+        .await?
+        .into_inner();
+    if hello.node_id != peer.node_id {
+        return Err(format!(
+            "peer hello node_id mismatch expected={} actual={}",
+            peer.node_id, hello.node_id
+        )
+        .into());
+    }
+    if hello.cluster_id != config.cluster_id {
+        return Err(format!(
+            "peer hello cluster_id mismatch expected={} actual={}",
+            config.cluster_id, hello.cluster_id
+        )
+        .into());
+    }
+
+    let remote = client
+        .peer_list_operations(signed_peer_transport_request(
+            PeerListOperationsRequest {
+                after_position: 0,
+                limit,
+                peer_node_id: config.node_id.clone(),
+                use_recorded_cursor: true,
+            },
+            identity,
+            config.cluster_id.as_str(),
+            PEER_METHOD_LIST_OPERATIONS,
+        )?)
+        .await?
+        .into_inner();
+    let pulled_operations = remote.operations.len();
+    let mut duplicate_operations = 0_usize;
+    let mut materialized_records = 0_usize;
+    if !dry_run && !remote.operations.is_empty() {
+        let envelopes = remote
+            .operations
+            .iter()
+            .cloned()
+            .map(core_envelope_from_proto)
+            .collect::<Result<Vec<_>, _>>()?;
+        let bootstrap =
+            ledger.bootstrap_from_peer_operations(config.cluster_id.as_str(), &envelopes)?;
+        duplicate_operations = bootstrap.duplicate_operations;
+        materialized_records = bootstrap.materialized_records;
+        if let Some(last) = remote.operations.last() {
+            client
+                .peer_ack_operations(signed_peer_transport_request(
+                    PeerAckOperationsRequest {
+                        peer_node_id: config.node_id.clone(),
+                        position: last.position,
+                        body_hash_b64: last.body_hash_b64.clone(),
+                    },
+                    identity,
+                    config.cluster_id.as_str(),
+                    PEER_METHOD_ACK_OPERATIONS,
+                )?)
+                .await?;
+        }
+    }
+
+    let peer_cursor = ledger
+        .get_peer_cursor(peer.node_id.as_str())?
+        .map(|cursor| cursor.last_position)
+        .unwrap_or(0);
+    let local_batch = ledger.list_after(peer_cursor, limit as usize)?;
+    let pushed_operations = if dry_run || local_batch.is_empty() {
+        0
+    } else {
+        let last_sent = local_batch.last().cloned();
+        let pushed = client
+            .peer_push_operations(signed_peer_transport_request(
+                PeerPushOperationsRequest {
+                    operations: local_batch
+                        .iter()
+                        .map(proto_envelope_from_operation)
+                        .collect(),
+                },
+                identity,
+                config.cluster_id.as_str(),
+                PEER_METHOD_PUSH_OPERATIONS,
+            )?)
+            .await?
+            .into_inner();
+        if let Some(last_sent) = last_sent {
+            ledger.record_peer_cursor(
+                peer.node_id.as_str(),
+                last_sent.position,
+                last_sent.body_hash_b64.as_str(),
+            )?;
+        }
+        pushed.accepted_count
+    };
+
+    Ok(ClusterPeerSyncReport {
+        accepted: hello.accepted,
+        peer_latest_position: hello.latest_position,
+        pulled_operations,
+        duplicate_operations,
+        materialized_records,
+        pushed_operations,
+        local_latest_position: ledger.latest_position()?,
+    })
+}
+
+fn run_cluster_migrate(dry_run: bool) -> Result<i32, Box<dyn std::error::Error>> {
+    let data_dir = resolve_primary_data_dir();
+    let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
+    let identity_path = data_dir.join(NODE_IDENTITY_FILE);
+    let config = ClusterConfig::load(config_path.as_path())?;
+    let identity = NodeIdentity::load(identity_path.as_path())?;
+    if identity.node_id != config.node_id {
+        return Err(format!(
+            "node identity mismatch: config node_id={} identity node_id={}",
+            config.node_id, identity.node_id
+        )
+        .into());
+    }
+
+    let store = HemStore::open(data_dir.as_path())?;
+    let report = store.migrate_local_store_to_ledger(LocalStoreLedgerMigrationInput {
+        cluster_id: config.cluster_id.as_str(),
+        identity: &identity,
+        dry_run,
+    })?;
+
+    print_cluster_kv("migration_dry_run", report.dry_run);
+    print_cluster_kv("cluster_id", report.cluster_id.as_str());
+    print_cluster_kv("node_id", report.node_id.as_str());
+    print_cluster_kv("ledger_start_position", report.ledger_start_position);
+    print_cluster_kv("ledger_end_position", report.ledger_end_position);
+    print_cluster_kv("groups_scanned", report.groups_scanned);
+    print_cluster_kv("secrets_scanned", report.secrets_scanned);
+    print_cluster_kv("value_keys_scanned", report.value_keys_scanned);
+    print_cluster_kv("grants_scanned", report.grants_scanned);
+    print_cluster_kv("group_operations", report.group_operations);
+    print_cluster_kv("metadata_operations", report.metadata_operations);
+    print_cluster_kv("value_operations", report.value_operations);
+    print_cluster_kv("grant_operations", report.grant_operations);
+    print_cluster_kv("operations_planned", report.operations_planned);
+    print_cluster_kv("operations_appended", report.operations_appended);
+    print_cluster_kv("unsupported_records", report.unsupported_records.len());
+    for record in report.unsupported_records {
+        print_cluster_kv("unsupported_record", record);
+    }
+    Ok(0)
+}
+
+fn run_cluster_rewrap_values(
+    dry_run: bool,
+    actor: String,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let data_dir = resolve_primary_data_dir();
+    let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
+    let identity_path = data_dir.join(NODE_IDENTITY_FILE);
+    let config = ClusterConfig::load(config_path.as_path())?;
+    let identity = NodeIdentity::load(identity_path.as_path())?;
+    if identity.node_id != config.node_id {
+        return Err(format!(
+            "node identity mismatch: config node_id={} identity node_id={}",
+            config.node_id, identity.node_id
+        )
+        .into());
+    }
+    let recipients = cluster_key_recipients(&config, &identity)?;
+    let store = HemStore::open(data_dir.as_path())?;
+    let report = store.rewrap_latest_ledger_values_for_nodes(LedgerValueRewrapInput {
+        cluster_id: config.cluster_id.as_str(),
+        identity: &identity,
+        actor: actor.as_str(),
+        recipients: recipients.as_slice(),
+        dry_run,
+    })?;
+
+    print_cluster_kv("rewrap_dry_run", report.dry_run);
+    print_cluster_kv("cluster_id", report.cluster_id.as_str());
+    print_cluster_kv("node_id", report.node_id.as_str());
+    print_cluster_kv("ledger_start_position", report.ledger_start_position);
+    print_cluster_kv("ledger_end_position", report.ledger_end_position);
+    print_cluster_kv("recipients", recipients.len());
+    print_cluster_kv("values_scanned", report.values_scanned);
+    print_cluster_kv("values_rewrapped", report.values_rewrapped);
+    print_cluster_kv("values_already_current", report.values_already_current);
+    print_cluster_kv("operations_planned", report.operations_planned);
+    print_cluster_kv("operations_appended", report.operations_appended);
+    print_cluster_kv("unsupported_records", report.unsupported_records.len());
+    for record in report.unsupported_records {
+        print_cluster_kv("unsupported_record", record);
+    }
+    Ok(0)
+}
+
+fn cluster_key_recipients(
+    config: &ClusterConfig,
+    identity: &NodeIdentity,
+) -> Result<Vec<NodeKeyRecipient>, Box<dyn std::error::Error>> {
+    let mut recipients = Vec::new();
+    if let Some(public_key_b64) = identity.wrap_public_key_b64.as_ref() {
+        recipients.push(NodeKeyRecipient {
+            node_id: identity.node_id.clone(),
+            public_key_b64: public_key_b64.clone(),
+        });
+    }
+    for peer in &config.peers {
+        if let Some(public_key_b64) = peer.wrap_public_key.as_ref() {
+            recipients.push(NodeKeyRecipient {
+                node_id: peer.node_id.clone(),
+                public_key_b64: public_key_b64.clone(),
+            });
+        }
+    }
+    if recipients.is_empty() {
+        return Err("cluster has no node wrap recipients configured".into());
+    }
+    Ok(recipients)
+}
+
+fn run_cluster_verify(repair: bool) -> Result<i32, Box<dyn std::error::Error>> {
+    let data_dir = resolve_primary_data_dir();
+    let ledger = LedgerStore::open(data_dir.as_path())?;
+    let repaired_records = if repair {
+        ledger.repair_materializers()?
+    } else {
+        0
+    };
+    let report = ledger.verify_integrity()?;
+    let ledger_ok = report.ok;
+    let security_report = inspect_data_dir_security(data_dir.as_path())?;
+    let security_ok = security_report.ok;
+
+    print_cluster_kv("ledger_ok", ledger_ok);
+    print_cluster_kv("latest_position", report.latest_position);
+    print_cluster_kv("latest_body_hash", report.latest_body_hash_b64.as_str());
+    print_cluster_kv("operations_checked", report.operations_checked);
+    print_cluster_kv("value_blobs_checked", report.value_blobs_checked);
+    print_cluster_kv("checkpoints_checked", report.checkpoints_checked);
+    print_cluster_kv(
+        "checkpoint_cosignatures_checked",
+        report.checkpoint_cosignatures_checked,
+    );
+    print_cluster_kv("peer_cursors_checked", report.peer_cursors_checked);
+    print_cluster_kv("forks_declared", report.forks_declared);
+    print_cluster_kv("fork_replays_declared", report.fork_replays_declared);
+    print_cluster_kv("issues", report.issues.len());
+    print_cluster_kv("repaired_materializer_records", repaired_records);
+    print_cluster_kv("data_dir_security_ok", security_ok);
+    print_cluster_kv("data_dir_security_issues", security_report.issues.len());
+    for issue in report.issues {
+        println!(
+            "issue severity={} category={} reference={} message={}",
+            issue.severity, issue.category, issue.reference, issue.message
+        );
+    }
+    for issue in &security_report.issues {
+        println!(
+            "security_issue kind={} mode={} path={} message={}",
+            issue.kind,
+            format_mode(issue.mode),
+            issue.path.display(),
+            issue.message
+        );
+    }
+    if !security_ok {
+        append_cluster_security_audit(data_dir.as_path(), security_report.issues.len());
+    }
+    Ok(if ledger_ok && security_ok { 0 } else { 2 })
+}
+
+fn append_cluster_security_audit(data_dir: &Path, issue_count: usize) {
+    let audit_store = match hem_core::AuditStore::open(data_dir) {
+        Ok(store) => store,
+        Err(err) => {
+            eprintln!(
+                "warning: failed to open audit store for cluster verify security audit: {err}"
+            );
+            return;
+        }
+    };
+    let entry = CoreAuditEntry {
+        audit_id: valhall_config::ids::generate_prefixed_entropy_id("aud"),
+        ts: Utc::now(),
+        action: "cluster.verify.security".to_string(),
+        actor: "hem-cli".to_string(),
+        token_id: String::new(),
+        secret_scope: None,
+        secret_name: String::new(),
+        result: "unsafe_permissions".to_string(),
+        details: format!("issues={issue_count}"),
+    };
+    if let Err(err) = audit_store.append(&entry) {
+        eprintln!("warning: failed to append cluster verify security audit entry: {err}");
+    }
+}
+
+fn format_mode(mode: Option<u32>) -> String {
+    match mode {
+        Some(mode) => format!("{mode:03o}"),
+        None => "unknown".to_string(),
+    }
+}
+
+fn run_cluster_fork(
+    parent_checkpoint: Option<String>,
+    actor: String,
+    reason: String,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let actor = actor.trim();
+    if actor.is_empty() {
+        return Err("actor must not be empty".into());
+    }
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err("fork reason must not be empty".into());
+    }
+
+    let data_dir = resolve_primary_data_dir();
+    let config = ClusterConfig::load(data_dir.join(CLUSTER_CONFIG_FILE).as_path())?;
+    let identity = NodeIdentity::load(data_dir.join(NODE_IDENTITY_FILE).as_path())?;
+    if identity.node_id != config.node_id {
+        return Err(format!(
+            "node identity mismatch: config node_id={} identity node_id={}",
+            config.node_id, identity.node_id
+        )
+        .into());
+    }
+
+    let ledger = LedgerStore::open(data_dir.as_path())?;
+    let fork = ledger.declare_hard_fork(
+        &identity,
+        config.cluster_id.as_str(),
+        parent_checkpoint.as_deref(),
+        actor,
+        reason,
+    )?;
+
+    print_cluster_kv("fork_declared", true);
+    print_cluster_kv("fork_id", fork.fork_id.as_str());
+    print_cluster_kv("epoch", fork.epoch);
+    print_cluster_kv("parent_checkpoint_id", fork.parent_checkpoint_id.as_str());
+    print_cluster_kv(
+        "parent_checkpoint_hash",
+        fork.parent_checkpoint_body_hash_b64.as_str(),
+    );
+    print_cluster_kv("parent_position", fork.parent_position);
+    print_cluster_kv("operation_id", fork.operation_id.as_str());
+    Ok(0)
+}
+
+fn run_cluster_replay_fork(
+    fork_id: String,
+    confirm_rewind: Option<String>,
+    backup_confirmed: Option<String>,
+    actor: String,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let fork_id = fork_id.trim();
+    if fork_id.is_empty() {
+        return Err("fork id must not be empty".into());
+    }
+    let actor = actor.trim();
+    if actor.is_empty() {
+        return Err("actor must not be empty".into());
+    }
+    let Some(confirm_rewind) = confirm_rewind else {
+        return Err(format!("destructive replay requires --confirm-rewind {fork_id}").into());
+    };
+    if confirm_rewind.trim() != fork_id {
+        return Err(format!("--confirm-rewind must exactly match fork id {fork_id}").into());
+    }
+    let Some(backup_reference) = backup_confirmed else {
+        return Err("destructive replay requires --backup-confirmed <backup-reference>".into());
+    };
+    let backup_reference = backup_reference.trim();
+    if backup_reference.is_empty() {
+        return Err("--backup-confirmed must not be empty".into());
+    }
+
+    let data_dir = resolve_primary_data_dir();
+    let config = ClusterConfig::load(data_dir.join(CLUSTER_CONFIG_FILE).as_path())?;
+    let identity = NodeIdentity::load(data_dir.join(NODE_IDENTITY_FILE).as_path())?;
+    if identity.node_id != config.node_id {
+        return Err(format!(
+            "node identity mismatch: config node_id={} identity node_id={}",
+            config.node_id, identity.node_id
+        )
+        .into());
+    }
+
+    let ledger = LedgerStore::open(data_dir.as_path())?;
+    let report = ledger.execute_hard_fork_replay(
+        &identity,
+        LedgerForkReplayInput {
+            fork_id,
+            actor,
+            backup_reference,
+        },
+    )?;
+
+    print_cluster_kv("fork_replay_executed", true);
+    print_cluster_kv("replay_id", report.replay_id.as_str());
+    print_cluster_kv("fork_id", report.fork_id.as_str());
+    print_cluster_kv("parent_position", report.parent_position);
+    print_cluster_kv("fork_position", report.fork_position);
+    print_cluster_kv("latest_position", report.latest_position);
+    print_cluster_kv("replay_operation_id", report.replay_operation_id.as_str());
+    print_cluster_kv("operations_replayed", report.operations_replayed);
+    print_cluster_kv("operations_skipped", report.operations_skipped);
+    print_cluster_kv(
+        "materializer_records_rebuilt",
+        report.materializer_records_rebuilt,
+    );
+    Ok(0)
+}
+
+fn run_cluster_collisions() -> Result<i32, Box<dyn std::error::Error>> {
+    let data_dir = resolve_primary_data_dir();
+    let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
+    if !config_path.exists() {
+        print_cluster_kv("collisions", 0);
+        return Ok(0);
+    }
+
+    let config = ClusterConfig::load(config_path.as_path())?;
+    let ledger = LedgerStore::open(data_dir.as_path())?;
+    ledger.materialize_secret_value_versions()?;
+    let collisions = ledger.list_open_collisions(config.cluster_id.as_str())?;
+    print_cluster_kv("collisions", collisions.len());
+    for collision in collisions {
+        print_cluster_collision(&collision);
+    }
+    Ok(0)
+}
+
+async fn run_cluster_resolve_collision(
+    collision_id: String,
+    resolution: String,
+    actor: String,
+    allow_local: bool,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let collision_id = collision_id.trim();
+    if collision_id.is_empty() {
+        return Err("collision id must not be empty".into());
+    }
+    let resolution = resolution.trim();
+    if resolution.is_empty() {
+        return Err("resolution must not be empty".into());
+    }
+    let actor = actor.trim();
+    if actor.is_empty() {
+        return Err("actor must not be empty".into());
+    }
+
+    let data_dir = resolve_primary_data_dir();
+    let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
+    let identity_path = data_dir.join(NODE_IDENTITY_FILE);
+    let config = ClusterConfig::load(config_path.as_path())?;
+    let identity = NodeIdentity::load(identity_path.as_path())?;
+    if identity.node_id != config.node_id {
+        return Err(format!(
+            "node identity mismatch: config node_id={} identity node_id={}",
+            config.node_id, identity.node_id
+        )
+        .into());
+    }
+
+    let ledger = LedgerStore::open(data_dir.as_path())?;
+    ledger.materialize_secret_value_versions()?;
+    let collision = ledger
+        .get_collision(collision_id)?
+        .ok_or_else(|| format!("open collision not found: {collision_id}"))?;
+    if collision.state != "open" {
+        return Err(format!("open collision not found: {collision_id}").into());
+    }
+    let agreement = if config.quorum > 1 && !allow_local {
+        Some(
+            collect_collision_quorum_agreement(&config, &identity, &ledger, &collision, resolution)
+                .await?,
+        )
+    } else if config.quorum > 1 {
+        Some(serde_json::json!({
+            "kind": "local_manual_v1",
+            "reason": "allow_local",
+            "required_cluster_quorum": config.quorum,
+            "actor": actor,
+        }))
+    } else {
+        None
+    };
+    let operation = ledger.append_collision_resolution_with_agreement(
+        &identity,
+        collision_id,
+        actor,
+        resolution,
+        agreement,
+    )?;
+    ledger.materialize_secret_value_versions()?;
+
+    print_cluster_kv("collision_resolved", true);
+    print_cluster_kv("collision_id", collision_id);
+    print_cluster_kv("operation_id", operation.operation_id.as_str());
+    print_cluster_kv("operation_type", operation.op_type.as_str());
+    Ok(0)
+}
+
+async fn collect_collision_quorum_agreement(
+    config: &ClusterConfig,
+    identity: &NodeIdentity,
+    ledger: &LedgerStore,
+    collision: &LedgerCollision,
+    resolution: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let required_peer_acks = usize::from(config.quorum.saturating_sub(1));
+    let requester_latest_position = ledger.latest_position()?;
+    let requester_latest_body_hash_b64 = ledger.latest_body_hash()?.unwrap_or_default();
+    let nonce = format!(
+        "hca_{}",
+        valhall_config::ids::generate_entropy_prefixed_ulid()
+    );
+    let mut accepted = Vec::new();
+    let mut failures = Vec::new();
+
+    for peer in &config.peers {
+        match request_peer_collision_approval(
+            config,
+            identity,
+            peer,
+            collision,
+            resolution,
+            nonce.as_str(),
+            requester_latest_position,
+            requester_latest_body_hash_b64.as_str(),
+        )
+        .await
+        {
+            Ok(evidence) => {
+                accepted.push(evidence);
+                if accepted.len() >= required_peer_acks {
+                    break;
+                }
+            }
+            Err(err) => failures.push(serde_json::json!({
+                "peer_node_id": peer.node_id.as_str(),
+                "endpoint": peer.endpoint.as_str(),
+                "error": err.to_string(),
+            })),
+        }
+    }
+
+    if accepted.len() < required_peer_acks {
+        let first_failure = failures
+            .first()
+            .and_then(|failure| failure.get("error"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("-");
+        return Err(format!(
+            "collision resolution requires {required_peer_acks} reachable peer approval(s); accepted={} configured_peers={} failures={} first_failure={}",
+            accepted.len(),
+            config.peers.len(),
+            failures.len(),
+            first_failure
+        )
+        .into());
+    }
+
+    Ok(serde_json::json!({
+        "kind": "collision_quorum_v1",
+        "cluster_id": config.cluster_id.as_str(),
+        "requester_node_id": identity.node_id.as_str(),
+        "collision_id": collision.collision_id.as_str(),
+        "scope": collision.scope.as_str(),
+        "name": collision.name.as_str(),
+        "key": collision.key.as_str(),
+        "current_operation_id": collision.current_operation_id.as_str(),
+        "incoming_operation_id": collision.incoming_operation_id.as_str(),
+        "resolution": resolution,
+        "required_cluster_quorum": config.quorum,
+        "required_peer_acks": required_peer_acks,
+        "nonce": nonce,
+        "requester_latest_position": requester_latest_position,
+        "requester_latest_body_hash_b64": requester_latest_body_hash_b64,
+        "accepted": accepted,
+        "failures": failures,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn request_peer_collision_approval(
+    config: &ClusterConfig,
+    identity: &NodeIdentity,
+    peer: &PeerConfig,
+    collision: &LedgerCollision,
+    resolution: &str,
+    nonce: &str,
+    requester_latest_position: i64,
+    requester_latest_body_hash_b64: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let channel = Endpoint::from_shared(peer.endpoint.clone())?
+        .connect_timeout(Duration::from_secs(CLUSTER_PEER_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(CLUSTER_PEER_RPC_TIMEOUT_SECS))
+        .connect()
+        .await?;
+    let mut client = HemRuntimeClient::new(channel);
+    let response = client
+        .peer_approve_collision(signed_peer_transport_request(
+            PeerApproveCollisionRequest {
+                cluster_id: config.cluster_id.clone(),
+                requester_node_id: identity.node_id.clone(),
+                requester_public_key: identity.signing_public_key_b64.clone(),
+                nonce: nonce.to_string(),
+                collision_id: collision.collision_id.clone(),
+                scope: collision.scope.clone(),
+                name: collision.name.clone(),
+                key: collision.key.clone(),
+                current_operation_id: collision.current_operation_id.clone(),
+                incoming_operation_id: collision.incoming_operation_id.clone(),
+                base_version_seq: collision.base_version_seq,
+                current_version_seq: collision.current_version_seq,
+                resolution: resolution.to_string(),
+                requester_latest_position,
+                requester_latest_body_hash_b64: requester_latest_body_hash_b64.to_string(),
+            },
+            identity,
+            config.cluster_id.as_str(),
+            PEER_METHOD_APPROVE_COLLISION,
+        )?)
+        .await?
+        .into_inner();
+
+    if !response.accepted {
+        let reason = if response.reason.trim().is_empty() {
+            "-"
+        } else {
+            response.reason.as_str()
+        };
+        return Err(format!("peer rejected collision approval: {reason}").into());
+    }
+    if response.cluster_id != config.cluster_id {
+        return Err(format!(
+            "cluster_id mismatch expected={} actual={}",
+            config.cluster_id, response.cluster_id
+        )
+        .into());
+    }
+    if response.node_id != peer.node_id {
+        return Err(format!(
+            "node_id mismatch expected={} actual={}",
+            peer.node_id, response.node_id
+        )
+        .into());
+    }
+    if response.signing_public_key_b64 != peer.public_key {
+        return Err("signing public key mismatch".into());
+    }
+
+    let statement = CollisionAgreementStatement {
+        version: "hem-collision-agreement-v1",
+        cluster_id: config.cluster_id.as_str(),
+        requester_node_id: identity.node_id.as_str(),
+        approver_node_id: response.node_id.as_str(),
+        nonce,
+        collision_id: collision.collision_id.as_str(),
+        scope: collision.scope.as_str(),
+        name: collision.name.as_str(),
+        key: collision.key.as_str(),
+        current_operation_id: collision.current_operation_id.as_str(),
+        incoming_operation_id: collision.incoming_operation_id.as_str(),
+        base_version_seq: collision.base_version_seq,
+        current_version_seq: collision.current_version_seq,
+        resolution,
+        requester_latest_position,
+        requester_latest_body_hash_b64,
+        approver_latest_position: response.latest_position,
+        approver_latest_body_hash_b64: response.latest_body_hash_b64.as_str(),
+    };
+    let statement_bytes = serde_json::to_vec(&statement)?;
+    let expected_hash = node_statement_hash_b64(statement_bytes.as_slice());
+    if response.statement_hash_b64 != expected_hash {
+        return Err(format!(
+            "statement hash mismatch expected={} actual={}",
+            expected_hash, response.statement_hash_b64
+        )
+        .into());
+    }
+    verify_node_statement_signature(
+        peer.public_key.as_str(),
+        statement_bytes.as_slice(),
+        response.signature_b64.as_str(),
+    )?;
+    let statement_json = serde_json::to_value(&statement)?;
+
+    Ok(serde_json::json!({
+        "peer_node_id": response.node_id,
+        "endpoint": peer.endpoint.as_str(),
+        "latest_position": response.latest_position,
+        "latest_body_hash_b64": response.latest_body_hash_b64,
+        "statement_hash_b64": response.statement_hash_b64,
+        "signing_public_key_b64": response.signing_public_key_b64,
+        "signature_b64": response.signature_b64,
+        "statement": statement_json,
+    }))
+}
+
+fn run_cluster_init(
+    node_id: String,
+    listen: String,
+    quorum: u16,
+    label: Option<String>,
+    master_node_id: Option<String>,
+    force: bool,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let data_dir = resolve_primary_data_dir();
+    let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
+    let identity_path = data_dir.join(NODE_IDENTITY_FILE);
+    if !force && (config_path.exists() || identity_path.exists()) {
+        return Err(format!(
+            "cluster files already exist in {}; pass --force to replace cluster.toml and node-identity.json",
+            data_dir.display()
+        )
+        .into());
+    }
+
+    fs::create_dir_all(data_dir.as_path())?;
+    let cluster_id = format!(
+        "hmc_{}",
+        valhall_config::ids::generate_entropy_prefixed_ulid()
+    );
+    let master_node_id = master_node_id.unwrap_or_else(|| node_id.clone());
+    let config = ClusterConfig {
+        enabled: true,
+        cluster_id,
+        node_id: node_id.clone(),
+        listen,
+        quorum,
+        master_node_id: Some(master_node_id),
+        peers: Vec::new(),
+    };
+    let identity = NodeIdentity::generate(node_id.as_str(), label.unwrap_or_default().as_str())?;
+
+    config.save(config_path.as_path())?;
+    identity.save(identity_path.as_path())?;
+
+    print_cluster_kv("cluster_initialized", true);
+    print_cluster_kv("data_dir", data_dir.display());
+    print_cluster_kv("cluster_id", config.cluster_id.as_str());
+    print_cluster_kv("node_id", config.node_id.as_str());
+    print_cluster_kv("listen", config.listen.as_str());
+    print_cluster_kv("quorum", config.quorum);
+    Ok(0)
+}
+
+fn run_cluster_status() -> Result<i32, Box<dyn std::error::Error>> {
+    let data_dir = resolve_primary_data_dir();
+    let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
+    let identity_path = data_dir.join(NODE_IDENTITY_FILE);
+    if !config_path.exists() {
+        print_cluster_kv("cluster_enabled", false);
+        print_cluster_kv("data_dir", data_dir.display());
+        return Ok(0);
+    }
+
+    let config = ClusterConfig::load(config_path.as_path())?;
+    let identity = NodeIdentity::load(identity_path.as_path())?;
+    if identity.node_id != config.node_id {
+        return Err(format!(
+            "node identity mismatch: config node_id={} identity node_id={}",
+            config.node_id, identity.node_id
+        )
+        .into());
+    }
+
+    print_cluster_kv("cluster_enabled", config.enabled);
+    print_cluster_kv("data_dir", data_dir.display());
+    print_cluster_kv("cluster_id", config.cluster_id.as_str());
+    print_cluster_kv("node_id", config.node_id.as_str());
+    print_cluster_kv("listen", config.listen.as_str());
+    print_cluster_kv("quorum", config.quorum);
+    print_cluster_kv(
+        "master_node_id",
+        config.master_node_id.as_deref().unwrap_or(""),
+    );
+    print_cluster_kv("peers", config.peers.len());
+    print_cluster_kv(
+        "identity_public_key",
+        identity.signing_public_key_b64.as_str(),
+    );
+    let ledger = LedgerStore::open(data_dir.as_path())?;
+    let checkpoints = ledger
+        .list_checkpoints()?
+        .into_iter()
+        .filter(|checkpoint| checkpoint.body.cluster_id == config.cluster_id)
+        .collect::<Vec<_>>();
+    print_cluster_kv("checkpoints", checkpoints.len());
+    if let Some(latest) = ledger.latest_checkpoint(config.cluster_id.as_str())? {
+        print_cluster_kv("latest_checkpoint_id", latest.body.checkpoint_id.as_str());
+        print_cluster_kv("latest_checkpoint_position", latest.body.to_position);
+        print_cluster_kv("latest_checkpoint_hash", latest.body_hash_b64.as_str());
+        let cosignatures =
+            ledger.list_checkpoint_cosignatures(latest.body.checkpoint_id.as_str())?;
+        print_cluster_kv("latest_checkpoint_cosignatures", cosignatures.len());
+    } else {
+        print_cluster_kv("latest_checkpoint_id", "");
+        print_cluster_kv("latest_checkpoint_position", 0);
+        print_cluster_kv("latest_checkpoint_hash", "");
+        print_cluster_kv("latest_checkpoint_cosignatures", 0);
+    }
+    Ok(0)
+}
+
+fn run_cluster_health() -> Result<i32, Box<dyn std::error::Error>> {
+    let data_dir = resolve_primary_data_dir();
+    let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
+    let identity_path = data_dir.join(NODE_IDENTITY_FILE);
+    if !config_path.exists() {
+        print_cluster_kv("cluster_health", true);
+        print_cluster_kv("cluster_health_status", "warning");
+        print_cluster_kv("health_exit_code", 1);
+        print_cluster_kv("cluster_enabled", false);
+        print_cluster_kv("data_dir", data_dir.display());
+        print_cluster_kv("health_error", "cluster_config_missing");
+        return Ok(1);
+    }
+
+    let config = ClusterConfig::load(config_path.as_path())?;
+    let identity = NodeIdentity::load(identity_path.as_path())?;
+    if identity.node_id != config.node_id {
+        print_cluster_kv("cluster_health", true);
+        print_cluster_kv("cluster_health_status", "critical");
+        print_cluster_kv("health_exit_code", 2);
+        print_cluster_kv("cluster_enabled", config.enabled);
+        print_cluster_kv("cluster_id", config.cluster_id.as_str());
+        print_cluster_kv("node_id", config.node_id.as_str());
+        print_cluster_kv("identity_node_id", identity.node_id.as_str());
+        print_cluster_kv("divergence_issues", 1);
+        print_cluster_kv("health_error", "node_identity_mismatch");
+        return Ok(2);
+    }
+
+    let ledger = LedgerStore::open(data_dir.as_path())?;
+    ledger.materialize_secret_value_versions()?;
+    let report = ledger.verify_integrity()?;
+    let latest_position = report.latest_position;
+    let latest_body_hash = report.latest_body_hash_b64.clone();
+    let collisions = ledger.list_open_collisions(config.cluster_id.as_str())?;
+    let divergence_issues = report
+        .issues
+        .iter()
+        .filter(|issue| issue.category == "divergence")
+        .count();
+    let error_issues = report
+        .issues
+        .iter()
+        .filter(|issue| issue.severity == "error")
+        .count();
+
+    let mut healthy_peers = 0_usize;
+    let mut lagging_peers = 0_usize;
+    let mut offline_peers = 0_usize;
+    let mut divergent_peers = 0_usize;
+    let mut unknown_peers = 0_usize;
+    for peer in &config.peers {
+        let cursor = ledger.get_peer_cursor(peer.node_id.as_str())?;
+        let (status, cursor_position, cursor_hash, last_seen, lag, error) = match cursor.as_ref() {
+            Some(cursor) if cursor.last_position > latest_position => {
+                divergent_peers += 1;
+                (
+                    "divergent",
+                    cursor.last_position,
+                    cursor.last_body_hash_b64.as_str(),
+                    cursor.updated_at.to_rfc3339(),
+                    0,
+                    "cursor_ahead_of_local_head",
+                )
+            }
+            Some(cursor)
+                if cursor.last_position == latest_position
+                    && cursor.last_body_hash_b64 == latest_body_hash =>
+            {
+                healthy_peers += 1;
+                (
+                    "caught_up",
+                    cursor.last_position,
+                    cursor.last_body_hash_b64.as_str(),
+                    cursor.updated_at.to_rfc3339(),
+                    0,
+                    "",
+                )
+            }
+            Some(cursor) if cursor.last_position == latest_position => {
+                divergent_peers += 1;
+                (
+                    "divergent",
+                    cursor.last_position,
+                    cursor.last_body_hash_b64.as_str(),
+                    cursor.updated_at.to_rfc3339(),
+                    0,
+                    "cursor_hash_mismatch",
+                )
+            }
+            Some(cursor) => {
+                lagging_peers += 1;
+                (
+                    "lagging",
+                    cursor.last_position,
+                    cursor.last_body_hash_b64.as_str(),
+                    cursor.updated_at.to_rfc3339(),
+                    latest_position.saturating_sub(cursor.last_position),
+                    "",
+                )
+            }
+            None if latest_position > 0 => {
+                offline_peers += 1;
+                (
+                    "offline",
+                    0,
+                    "",
+                    String::new(),
+                    latest_position,
+                    "missing_cursor",
+                )
+            }
+            None => {
+                unknown_peers += 1;
+                ("unknown", 0, "", String::new(), 0, "missing_cursor")
+            }
+        };
+        println!(
+            "peer_health node_id={} status={} endpoint={} cursor_position={} cursor_hash={} lag={} last_seen={} error={}",
+            peer.node_id,
+            status,
+            peer.endpoint,
+            cursor_position,
+            blank_dash(cursor_hash),
+            lag,
+            blank_dash(last_seen.as_str()),
+            blank_dash(error)
+        );
+    }
+
+    let latest_checkpoint = ledger.latest_checkpoint(config.cluster_id.as_str())?;
+    let (checkpoint_status, checkpoint_id, checkpoint_position, checkpoint_cosignatures) =
+        if let Some(checkpoint) = latest_checkpoint.as_ref() {
+            let cosignatures =
+                ledger.list_checkpoint_cosignatures(checkpoint.body.checkpoint_id.as_str())?;
+            let quorum_met = usize::from(config.quorum) <= 1 + cosignatures.len();
+            (
+                if quorum_met {
+                    "quorum_met"
+                } else {
+                    "pending_quorum"
+                },
+                checkpoint.body.checkpoint_id.as_str(),
+                checkpoint.body.to_position,
+                cosignatures.len(),
+            )
+        } else {
+            ("none", "", 0, 0)
+        };
+    let available_peer_votes = healthy_peers + lagging_peers;
+    let quorum_risk = usize::from(config.quorum) > 1 + available_peer_votes;
+    let checkpoint_warning =
+        latest_position > 0 && checkpoint_status != "quorum_met" && config.quorum > 1;
+    let critical = error_issues > 0 || divergent_peers > 0;
+    let warning = !critical
+        && (!collisions.is_empty()
+            || lagging_peers > 0
+            || offline_peers > 0
+            || unknown_peers > 0
+            || quorum_risk
+            || checkpoint_warning);
+    let (health_status, exit_code) = if critical {
+        ("critical", 2)
+    } else if warning {
+        ("warning", 1)
+    } else {
+        ("healthy", 0)
+    };
+
+    print_cluster_kv("cluster_health", true);
+    print_cluster_kv("cluster_health_status", health_status);
+    print_cluster_kv("health_exit_code", exit_code);
+    print_cluster_kv("cluster_enabled", config.enabled);
+    print_cluster_kv("data_dir", data_dir.display());
+    print_cluster_kv("cluster_id", config.cluster_id.as_str());
+    print_cluster_kv("node_id", config.node_id.as_str());
+    print_cluster_kv("listen", config.listen.as_str());
+    print_cluster_kv("quorum", config.quorum);
+    print_cluster_kv("configured_peers", config.peers.len());
+    print_cluster_kv("latest_position", latest_position);
+    print_cluster_kv("latest_body_hash", latest_body_hash.as_str());
+    print_cluster_kv("ledger_ok", report.ok);
+    print_cluster_kv("integrity_issues", report.issues.len());
+    print_cluster_kv("error_issues", error_issues);
+    print_cluster_kv("divergence_issues", divergence_issues);
+    print_cluster_kv("collisions", collisions.len());
+    print_cluster_kv("healthy_peers", healthy_peers);
+    print_cluster_kv("lagging_peers", lagging_peers);
+    print_cluster_kv("offline_peers", offline_peers);
+    print_cluster_kv("unknown_peers", unknown_peers);
+    print_cluster_kv("divergent_peers", divergent_peers);
+    print_cluster_kv("quorum_risk", quorum_risk);
+    print_cluster_kv("checkpoint_status", checkpoint_status);
+    print_cluster_kv("latest_checkpoint_id", checkpoint_id);
+    print_cluster_kv("latest_checkpoint_position", checkpoint_position);
+    print_cluster_kv("latest_checkpoint_cosignatures", checkpoint_cosignatures);
+    print_cluster_kv("sync_errors", offline_peers + divergent_peers);
+    for issue in &report.issues {
+        println!(
+            "health_issue severity={} category={} reference={} message={}",
+            issue.severity, issue.category, issue.reference, issue.message
+        );
+    }
+    for collision in collisions {
+        println!(
+            "collision_health collision_id={} scope={} name={} key={} current_operation_id={} incoming_operation_id={}",
+            collision.collision_id,
+            collision.scope,
+            collision.name,
+            collision.key,
+            collision.current_operation_id,
+            collision.incoming_operation_id
+        );
+    }
+    Ok(exit_code)
+}
+
+fn run_cluster_peers() -> Result<i32, Box<dyn std::error::Error>> {
+    let data_dir = resolve_primary_data_dir();
+    let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
+    if !config_path.exists() {
+        print_cluster_kv("peers", 0);
+        return Ok(0);
+    }
+
+    let config = ClusterConfig::load(config_path.as_path())?;
+    print_cluster_kv("peers", config.peers.len());
+    for peer in config.peers {
+        print_cluster_peer(&peer);
+    }
+    Ok(0)
+}
+
+fn resolve_primary_data_dir() -> PathBuf {
+    if let Ok(value) = std::env::var("HEM_DATA_DIR") {
+        if let Some(value) = normalize_optional_string(value) {
+            return PathBuf::from(value);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(DEFAULT_HEM_SUBDIR);
+    }
+    PathBuf::from(DEFAULT_HEM_SUBDIR)
+}
+
+fn run_policy_command(command: PolicyCommands) -> Result<i32, Box<dyn std::error::Error>> {
+    let data_dir = resolve_primary_data_dir();
+    let store = PolicyStore::open(data_dir.as_path())?;
+    match command {
+        PolicyCommands::List => {
+            let snapshot = store.snapshot()?;
+            print_cluster_kv("default_tier", snapshot.default_tier.as_str());
+            print_cluster_kv("scope_policies", snapshot.scope_tiers.len());
+            for binding in snapshot.scope_tiers {
+                println!(
+                    "scope target={} tier={}",
+                    binding.target,
+                    binding.tier.as_str()
+                );
+            }
+            print_cluster_kv("secret_policies", snapshot.secret_tiers.len());
+            for binding in snapshot.secret_tiers {
+                println!(
+                    "secret target={} tier={}",
+                    binding.target,
+                    binding.tier.as_str()
+                );
+            }
+        }
+        PolicyCommands::Get { scope, secret } => {
+            let target = parse_policy_target(scope, secret)?;
+            let tier = effective_policy_for_target(&store, &target)?;
+            print_cluster_kv("target", target.label());
+            print_cluster_kv("effective_tier", tier.as_str());
+        }
+        PolicyCommands::Set {
+            tier,
+            scope,
+            secret,
+            allow_downgrade,
+        } => {
+            let tier = CoreSecretPolicyTier::parse(tier.as_str())?;
+            let target = parse_policy_target(scope, secret)?;
+            let previous = effective_policy_for_target(&store, &target)?;
+            if policy_tier_rank(tier) < policy_tier_rank(previous) && !allow_downgrade {
+                return Err(format!(
+                    "policy downgrade from {} to {} requires --allow-downgrade",
+                    previous.as_str(),
+                    tier.as_str()
+                )
+                .into());
+            }
+
+            match &target {
+                PolicyTarget::Default => store.set_default_policy(tier)?,
+                PolicyTarget::Scope { scope, .. } => store.set_scope_policy(scope, tier)?,
+                PolicyTarget::Secret { scope, name, .. } => {
+                    store.set_secret_policy(scope, name.as_str(), tier)?;
+                }
+            }
+            print_cluster_kv("policy_set", true);
+            print_cluster_kv("target", target.label());
+            print_cluster_kv("previous_tier", previous.as_str());
+            print_cluster_kv("tier", tier.as_str());
+            print_cluster_kv("allow_downgrade", allow_downgrade);
+        }
+    }
+    Ok(0)
+}
+
+fn run_lease_command(command: LeaseCommands) -> Result<i32, Box<dyn std::error::Error>> {
+    let data_dir = resolve_primary_data_dir();
+    let store = PolicyStore::open(data_dir.as_path())?;
+    match command {
+        LeaseCommands::Issue {
+            secret,
+            requester,
+            node_id,
+            uses,
+            ttl_seconds,
+        } => {
+            let (scope, name, _) = parse_core_secret_ref(secret.as_str())?;
+            let lease = store.issue_offline_lease(IssueOfflineLeaseInput {
+                scope,
+                name,
+                requester,
+                node_id,
+                max_uses: uses,
+                ttl_seconds,
+            })?;
+            print_cluster_kv("lease_issued", true);
+            print_offline_lease(&lease);
+        }
+        LeaseCommands::List => {
+            let leases = store.list_offline_leases()?;
+            print_cluster_kv("leases", leases.len());
+            for lease in leases {
+                print_offline_lease(&lease);
+            }
+        }
+        LeaseCommands::Consume {
+            secret,
+            requester,
+            node_id,
+        } => {
+            let (scope, name, _) = parse_core_secret_ref(secret.as_str())?;
+            let lease = store.consume_offline_lease(
+                &scope,
+                name.as_str(),
+                requester.as_str(),
+                node_id.as_str(),
+            )?;
+            print_cluster_kv("lease_consumed", true);
+            print_offline_lease(&lease);
+        }
+        LeaseCommands::Revoke { lease_id, actor } => {
+            let lease = store.revoke_offline_lease(lease_id.as_str(), actor.as_str())?;
+            print_cluster_kv("lease_revoked", true);
+            print_offline_lease(&lease);
+        }
+    }
+    Ok(0)
+}
+
+#[derive(Debug, Clone)]
+enum PolicyTarget {
+    Default,
+    Scope {
+        scope: hem_core::SecretScope,
+        label: String,
+    },
+    Secret {
+        scope: hem_core::SecretScope,
+        name: String,
+        label: String,
+    },
+}
+
+impl PolicyTarget {
+    fn label(&self) -> &str {
+        match self {
+            Self::Default => "default",
+            Self::Scope { label, .. } | Self::Secret { label, .. } => label.as_str(),
+        }
+    }
+}
+
+fn parse_policy_target(
+    scope: Option<String>,
+    secret: Option<String>,
+) -> Result<PolicyTarget, Box<dyn std::error::Error>> {
+    if let Some(secret) = secret {
+        let (scope, name, label) = parse_core_secret_ref(secret.as_str())?;
+        return Ok(PolicyTarget::Secret { scope, name, label });
+    }
+    if let Some(scope) = scope {
+        let selector = parse_scope_selector_value(scope.as_str())?;
+        let core_scope = proto_scope_to_core(&selector)?;
+        return Ok(PolicyTarget::Scope {
+            scope: core_scope,
+            label: format_scope(&selector),
+        });
+    }
+    Ok(PolicyTarget::Default)
+}
+
+fn effective_policy_for_target(
+    store: &PolicyStore,
+    target: &PolicyTarget,
+) -> Result<CoreSecretPolicyTier, Box<dyn std::error::Error>> {
+    let snapshot = store.snapshot()?;
+    match target {
+        PolicyTarget::Default => Ok(snapshot.default_tier),
+        PolicyTarget::Scope { label, .. } => Ok(snapshot
+            .scope_tiers
+            .iter()
+            .find(|item| item.target == *label)
+            .map(|item| item.tier)
+            .unwrap_or(snapshot.default_tier)),
+        PolicyTarget::Secret { scope, name, .. } => Ok(store.effective_policy(scope, name)?),
+    }
+}
+
+fn parse_core_secret_ref(
+    value: &str,
+) -> Result<(hem_core::SecretScope, String, String), Box<dyn std::error::Error>> {
+    let secret = parse_secret_ref_or_global(value)?;
+    let scope = proto_scope_to_core(secret.scope.as_ref().ok_or("secret scope is required")?)?;
+    let label = format!(
+        "{}/{}",
+        secret
+            .scope
+            .as_ref()
+            .map(format_scope)
+            .unwrap_or_else(|| "global".to_string()),
+        secret.name
+    );
+    Ok((scope, secret.name, label))
+}
+
+fn policy_tier_rank(tier: CoreSecretPolicyTier) -> u8 {
+    match tier {
+        CoreSecretPolicyTier::LocalLogged => 0,
+        CoreSecretPolicyTier::OfflineLease => 1,
+        CoreSecretPolicyTier::PeerQuorum => 2,
+        CoreSecretPolicyTier::MasterBiometric => 3,
+    }
+}
+
+fn print_offline_lease(lease: &OfflineLease) {
+    print_cluster_kv("lease_id", lease.lease_id.as_str());
+    print_cluster_kv("scope", core_scope_label(&lease.scope));
+    print_cluster_kv("name", lease.name.as_str());
+    print_cluster_kv("requester", lease.requester.as_str());
+    print_cluster_kv("node_id", lease.node_id.as_str());
+    print_cluster_kv("max_uses", lease.max_uses);
+    print_cluster_kv("remaining_uses", lease.remaining_uses);
+    print_cluster_kv("issued_at", lease.issued_at.to_rfc3339());
+    print_cluster_kv("expires_at", lease.expires_at.to_rfc3339());
+    if let Some(revoked_at) = lease.revoked_at {
+        print_cluster_kv("revoked_at", revoked_at.to_rfc3339());
+    }
+    if let Some(revoked_by) = lease.revoked_by.as_ref() {
+        print_cluster_kv("revoked_by", revoked_by.as_str());
+    }
+}
+
+fn core_scope_label(scope: &hem_core::SecretScope) -> String {
+    match scope {
+        hem_core::SecretScope::Global => "global".to_string(),
+        hem_core::SecretScope::Project { project } => format!("project/{project}"),
+        hem_core::SecretScope::Identity { identity_id } => format!("identity/{identity_id}"),
+    }
+}
+
+fn print_cluster_peer(peer: &PeerConfig) {
+    println!(
+        "peer node_id={} endpoint={} public_key={} wrap_public_key={}",
+        peer.node_id,
+        peer.endpoint,
+        peer.public_key,
+        peer.wrap_public_key.as_deref().unwrap_or("")
+    );
+}
+
+fn proto_envelope_from_operation(operation: &LedgerOperation) -> proto::LedgerOperationEnvelope {
+    proto::LedgerOperationEnvelope {
+        body: Some(proto::LedgerOperationBody {
+            operation_id: operation.operation_id.clone(),
+            cluster_id: operation.cluster_id.clone(),
+            node_id: operation.node_id.clone(),
+            node_seq: operation.node_seq,
+            op_type: operation.op_type.clone(),
+            payload_json: operation.payload_json.to_string(),
+            created_at: operation.created_at.to_rfc3339(),
+            prev_hash_b64: operation.prev_hash_b64.clone(),
+        }),
+        body_hash_b64: operation.body_hash_b64.clone(),
+        signing_public_key_b64: operation.signing_public_key_b64.clone(),
+        signature_b64: operation.signature_b64.clone(),
+        position: operation.position,
+    }
+}
+
+fn core_envelope_from_proto(
+    operation: proto::LedgerOperationEnvelope,
+) -> Result<LedgerOperationEnvelope, Box<dyn std::error::Error>> {
+    let body = operation.body.ok_or("ledger operation body is required")?;
+    Ok(LedgerOperationEnvelope {
+        body: LedgerOperationBody {
+            operation_id: body.operation_id,
+            cluster_id: body.cluster_id,
+            node_id: body.node_id,
+            node_seq: body.node_seq,
+            op_type: body.op_type,
+            payload_json: serde_json::from_str(body.payload_json.as_str())?,
+            created_at: chrono::DateTime::parse_from_rfc3339(body.created_at.as_str())?
+                .with_timezone(&chrono::Utc),
+            prev_hash_b64: body.prev_hash_b64,
+        },
+        body_hash_b64: operation.body_hash_b64,
+        signing_public_key_b64: operation.signing_public_key_b64,
+        signature_b64: operation.signature_b64,
+    })
+}
+
+fn print_cluster_collision(collision: &LedgerCollision) {
+    println!(
+        "collision id={} secret={}/{} key={} current_operation={} incoming_operation={} base_version_seq={} current_version_seq={} created_at={}",
+        collision.collision_id,
+        collision.scope,
+        collision.name,
+        collision.key,
+        collision.current_operation_id,
+        collision.incoming_operation_id,
+        collision.base_version_seq,
+        collision.current_version_seq,
+        collision.created_at.to_rfc3339()
+    );
+}
+
+fn print_cluster_kv(key: &str, value: impl std::fmt::Display) {
+    println!("{key}={value}");
 }
 
 fn daemon_endpoint(override_value: Option<String>) -> String {
@@ -1164,6 +3636,49 @@ fn default_archive_path(scope: &str, name: &str) -> PathBuf {
 
 fn default_export_path() -> PathBuf {
     resolve_archive_dir().join(format!("{}-hem-export.bin", now_epoch_ms()))
+}
+
+fn signed_peer_transport_request<T>(
+    message: T,
+    identity: &NodeIdentity,
+    cluster_id: &str,
+    method: &str,
+) -> Result<Request<T>, Box<dyn std::error::Error>> {
+    let nonce = format!(
+        "hpt_{}",
+        valhall_config::ids::generate_entropy_prefixed_ulid()
+    );
+    let timestamp_unix = Utc::now().timestamp();
+    let statement_bytes = peer_transport_auth_statement_bytes(
+        cluster_id,
+        identity.node_id.as_str(),
+        method,
+        nonce.as_str(),
+        timestamp_unix,
+    )?;
+    let signature = identity.sign_statement(statement_bytes.as_slice())?;
+
+    let mut request = Request::new(message);
+    let metadata = request.metadata_mut();
+    metadata.insert(
+        PEER_TRANSPORT_AUTH_CLUSTER_ID_METADATA_KEY,
+        cluster_id.parse()?,
+    );
+    metadata.insert(
+        PEER_TRANSPORT_AUTH_NODE_ID_METADATA_KEY,
+        identity.node_id.parse()?,
+    );
+    metadata.insert(PEER_TRANSPORT_AUTH_METHOD_METADATA_KEY, method.parse()?);
+    metadata.insert(PEER_TRANSPORT_AUTH_NONCE_METADATA_KEY, nonce.parse()?);
+    metadata.insert(
+        PEER_TRANSPORT_AUTH_TIMESTAMP_METADATA_KEY,
+        timestamp_unix.to_string().parse()?,
+    );
+    metadata.insert(
+        PEER_TRANSPORT_AUTH_SIGNATURE_METADATA_KEY,
+        signature.parse()?,
+    );
+    Ok(request)
 }
 
 async fn connect_client(
@@ -1827,6 +4342,93 @@ fn confirm_human_approval(
         return Err("confirmation did not match; approval action canceled".into());
     }
     Ok(())
+}
+
+async fn confirm_biometric_approval(
+    client: &mut HemRuntimeClient<InterceptedService<Channel, BearerAuthInterceptor>>,
+    request_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = client
+        .list_pending_approvals(ListPendingApprovalsRequest { limit: 500 })
+        .await?
+        .into_inner();
+    let request = response
+        .requests
+        .iter()
+        .find(|item| item.request_id == request_id)
+        .ok_or_else(|| format!("pending approval request not found: {request_id}"))?;
+    let challenge = approval_challenge_from_proto(request)?;
+    let adapter = PlatformBiometricApprovalAdapter::detect();
+    let capability = adapter.capability();
+    let kind = capability.biometric_kind.as_deref().ok_or_else(|| {
+        "platform biometric approval unavailable on this node; use typed confirmation fallback"
+            .to_string()
+    })?;
+    let decision = adapter.approve(
+        &challenge,
+        ApprovalCredential::BiometricAssertion {
+            kind,
+            assertion: b"local-platform-prompt",
+        },
+    )?;
+    if decision.is_approved() {
+        Ok(())
+    } else {
+        Err(format!("platform biometric approval failed closed: {decision:?}").into())
+    }
+}
+
+fn approval_challenge_from_proto(
+    request: &proto::ApprovalRequestInfo,
+) -> Result<hem_core::ApprovalChallenge, Box<dyn std::error::Error>> {
+    let secret = request
+        .secret
+        .as_ref()
+        .ok_or("approval request is missing secret reference")?;
+    let scope = proto_scope_to_core(
+        secret
+            .scope
+            .as_ref()
+            .ok_or("approval request is missing secret scope")?,
+    )?;
+    let secret_version = normalize_optional_string(request.secret_version.clone());
+    let requested_by = normalize_optional_string(request.requester_token_id.clone())
+        .or_else(|| normalize_optional_string(request.requester_identity_id.clone()))
+        .or_else(|| normalize_optional_string(request.requester_project.clone()))
+        .ok_or("approval request is missing requester identity")?;
+    let challenge = hem_core::ApprovalChallenge {
+        request_id: request.request_id.clone(),
+        action: request.action.clone(),
+        secret_scope: scope,
+        secret_name: secret.name.clone(),
+        secret_version,
+        requested_by,
+    };
+    challenge.validate()?;
+    Ok(challenge)
+}
+
+fn proto_scope_to_core(
+    scope: &ScopeSelector,
+) -> Result<hem_core::SecretScope, Box<dyn std::error::Error>> {
+    match SecretScope::try_from(scope.scope).unwrap_or(SecretScope::Unspecified) {
+        SecretScope::Global => Ok(hem_core::SecretScope::Global),
+        SecretScope::Project if !scope.project.trim().is_empty() => {
+            Ok(hem_core::SecretScope::Project {
+                project: scope.project.clone(),
+            })
+        }
+        SecretScope::Project => Err("approval request project scope is missing project".into()),
+        SecretScope::Identity if !scope.identity_id.trim().is_empty() => {
+            Ok(hem_core::SecretScope::Identity {
+                identity_id: scope.identity_id.clone(),
+            })
+        }
+        SecretScope::Identity => {
+            Err("approval request identity scope is missing identity id".into())
+        }
+        SecretScope::Unspecified => Err("approval request scope is unspecified".into()),
+    }
 }
 
 fn secret_matches_query(secret: &proto::SecretInfo, query: &str) -> bool {
@@ -2566,6 +5168,46 @@ mod tests {
             approval_state_label(proto::ApprovalState::Approved as i32),
             "approved"
         );
+    }
+
+    #[test]
+    fn approval_challenge_from_proto_preserves_request_context_and_version() {
+        let request = proto::ApprovalRequestInfo {
+            request_id: "apr-test".to_string(),
+            state: proto::ApprovalState::Pending as i32,
+            secret: Some(SecretRef {
+                scope: Some(ScopeSelector {
+                    scope: SecretScope::Project as i32,
+                    project: "valhall".to_string(),
+                    identity_id: String::new(),
+                }),
+                name: "demo-secret".to_string(),
+            }),
+            requester_token_id: "agent-a".to_string(),
+            requester_identity_id: String::new(),
+            requester_project: String::new(),
+            reason: "secret read requires master approval".to_string(),
+            created_at: "2026-05-26T12:00:00Z".to_string(),
+            resolved_at: String::new(),
+            resolved_by: String::new(),
+            resolve_message: String::new(),
+            action: "get_secret".to_string(),
+            secret_version: "version-1".to_string(),
+        };
+
+        let challenge = approval_challenge_from_proto(&request).expect("challenge");
+
+        assert_eq!(challenge.request_id, "apr-test");
+        assert_eq!(challenge.action, "get_secret");
+        assert_eq!(
+            challenge.secret_scope,
+            hem_core::SecretScope::Project {
+                project: "valhall".to_string()
+            }
+        );
+        assert_eq!(challenge.secret_name, "demo-secret");
+        assert_eq!(challenge.secret_version.as_deref(), Some("version-1"));
+        assert_eq!(challenge.requested_by, "agent-a");
     }
 
     #[test]

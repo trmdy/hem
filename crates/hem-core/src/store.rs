@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
 };
@@ -8,17 +8,24 @@ use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use chrono::Utc;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::{
     audit::AuditStore,
-    crypto::{decrypt_value, encrypt_value, generate_master_key, EncryptedValue, MasterKey},
+    crypto::{
+        decrypt_value, encrypt_value, envelope_decrypt_for_node, envelope_encrypt_for_nodes,
+        generate_master_key, EncryptedValue, EnvelopeEncryptedValue, MasterKey, NodeKeyRecipient,
+    },
+    fs_security::{ensure_private_dir, set_owner_read_write_only},
     group::GroupStore,
+    ledger::{LedgerOperation, LedgerOperationInput, LedgerSecretValueVersion, LedgerStore},
     model::{
         validate_group_name, validate_secret_name, GrantInfo, SecretInfo, SecretScope,
         SecretWithValues, SetSecretInput,
     },
+    policy::PolicyStore,
     token::{TokenManager, TokenManagerConfig},
-    HemError, Result,
+    HemError, NodeIdentity, Result,
 };
 
 const MASTER_KEY_FILE: &str = "master.key";
@@ -98,6 +105,84 @@ struct ExportBundle {
     master_key_id: String,
     exported_at: chrono::DateTime<Utc>,
     secrets: Vec<SecretFile>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LocalStoreLedgerMigrationInput<'a> {
+    pub cluster_id: &'a str,
+    pub identity: &'a NodeIdentity,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalStoreLedgerMigrationReport {
+    pub dry_run: bool,
+    pub cluster_id: String,
+    pub node_id: String,
+    pub ledger_start_position: i64,
+    pub ledger_end_position: i64,
+    pub groups_scanned: usize,
+    pub secrets_scanned: usize,
+    pub value_keys_scanned: usize,
+    pub grants_scanned: usize,
+    pub group_operations: usize,
+    pub metadata_operations: usize,
+    pub value_operations: usize,
+    pub grant_operations: usize,
+    pub operations_planned: usize,
+    pub operations_appended: usize,
+    pub unsupported_records: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LedgerValueRewrapInput<'a> {
+    pub cluster_id: &'a str,
+    pub identity: &'a NodeIdentity,
+    pub actor: &'a str,
+    pub recipients: &'a [NodeKeyRecipient],
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedgerValueRewrapReport {
+    pub dry_run: bool,
+    pub cluster_id: String,
+    pub node_id: String,
+    pub ledger_start_position: i64,
+    pub ledger_end_position: i64,
+    pub values_scanned: usize,
+    pub values_rewrapped: usize,
+    pub values_already_current: usize,
+    pub operations_planned: usize,
+    pub operations_appended: usize,
+    pub unsupported_records: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportSecretsReport {
+    pub imported_secret_count: u32,
+    pub imported_secrets: Vec<SecretInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HemDataDirSecurityReport {
+    pub ok: bool,
+    pub issues: Vec<HemDataDirSecurityIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HemDataDirSecurityIssue {
+    pub path: PathBuf,
+    pub kind: String,
+    pub mode: Option<u32>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+struct PlannedLedgerOperation {
+    op_type: String,
+    payload_json: Value,
+    created_at: chrono::DateTime<Utc>,
 }
 
 impl MasterKeySet {
@@ -196,6 +281,329 @@ impl HemStore {
         AuditStore::open(self.data_dir.as_path())
     }
 
+    pub fn ledger_store(&self) -> Result<LedgerStore> {
+        LedgerStore::open(self.data_dir.as_path())
+    }
+
+    pub fn policy_store(&self) -> Result<PolicyStore> {
+        PolicyStore::open(self.data_dir.as_path())
+    }
+
+    pub fn append_secret_metadata_to_ledger(
+        &self,
+        cluster_id: &str,
+        identity: &NodeIdentity,
+        scope: &SecretScope,
+        name: &str,
+        actor: &str,
+    ) -> Result<LedgerOperation> {
+        normalize_subject("cluster_id", cluster_id)?;
+        scope.validate()?;
+        validate_secret_name(name)?;
+        let path = self.secret_file_path(scope, name);
+        if !path.exists() {
+            return Err(HemError::SecretNotFound(format!(
+                "{}/{}",
+                scope_label(scope),
+                name
+            )));
+        }
+        let file = read_secret_file(path.as_path())?;
+        let payload = json!({
+            "source": "hem-live-store",
+            "scope": scope_label(scope),
+            "name": file.info.name.as_str(),
+            "description": file.info.description.as_str(),
+            "requires_approval": file.info.requires_approval,
+            "group": file.info.group.as_deref(),
+            "created_at": file.info.created_at.to_rfc3339(),
+            "updated_at": file.info.updated_at.to_rfc3339(),
+            "created_by": file.info.created_by.as_str(),
+            "last_accessed_at": file.info.last_accessed_at.map(|value| value.to_rfc3339()),
+            "last_accessed_by": file.info.last_accessed_by.as_deref(),
+            "actor": normalize_actor(actor),
+        });
+        self.append_signed_ledger_operation(
+            cluster_id,
+            identity,
+            "secret.metadata.set",
+            payload,
+            file.info.updated_at,
+        )
+    }
+
+    pub fn append_secret_set_to_ledger(
+        &self,
+        cluster_id: &str,
+        identity: &NodeIdentity,
+        scope: &SecretScope,
+        name: &str,
+        actor: &str,
+    ) -> Result<Vec<LedgerOperation>> {
+        self.append_secret_set_to_ledger_for_nodes(cluster_id, identity, scope, name, actor, &[])
+    }
+
+    pub fn append_secret_set_to_ledger_for_nodes(
+        &self,
+        cluster_id: &str,
+        identity: &NodeIdentity,
+        scope: &SecretScope,
+        name: &str,
+        actor: &str,
+        recipients: &[NodeKeyRecipient],
+    ) -> Result<Vec<LedgerOperation>> {
+        let mut operations = Vec::new();
+        operations
+            .push(self.append_secret_metadata_to_ledger(cluster_id, identity, scope, name, actor)?);
+
+        let path = self.secret_file_path(scope, name);
+        let file = read_secret_file(path.as_path())?;
+        if file.values.is_empty() {
+            return Ok(operations);
+        }
+        let ledger = self.ledger_store()?;
+        ledger.materialize_secret_value_versions()?;
+        let scope_label = scope_label(scope);
+        let mut grouped_values: BTreeMap<i64, HashMap<String, EncryptedValue>> = BTreeMap::new();
+        for (key, value) in file.values {
+            let base_version_seq = ledger
+                .list_secret_value_versions(cluster_id, scope_label.as_str(), name, key.as_str())?
+                .last()
+                .map(|version| version.version_seq)
+                .unwrap_or(0);
+            grouped_values
+                .entry(base_version_seq)
+                .or_default()
+                .insert(key, value);
+        }
+
+        for (base_version_seq, values) in grouped_values {
+            let values_json = if recipients.is_empty() {
+                encrypted_values_json(&values)?
+            } else {
+                envelope_values_json(self, scope, name, &values, recipients)?
+            };
+            let payload = json!({
+                "source": "hem-live-store",
+                "key_model": if recipients.is_empty() { "local-master-v1" } else { "node-envelope-v1" },
+                "scope": scope_label.as_str(),
+                "name": name,
+                "values": values_json,
+                "base_version_seq": base_version_seq,
+                "actor": normalize_actor(actor),
+            });
+            operations.push(self.append_signed_ledger_operation(
+                cluster_id,
+                identity,
+                "secret.value.set",
+                payload,
+                Utc::now(),
+            )?);
+        }
+        Ok(operations)
+    }
+
+    pub fn append_signed_ledger_operation(
+        &self,
+        cluster_id: &str,
+        identity: &NodeIdentity,
+        op_type: &str,
+        payload_json: Value,
+        created_at: chrono::DateTime<Utc>,
+    ) -> Result<LedgerOperation> {
+        normalize_subject("cluster_id", cluster_id)?;
+        normalize_subject("node_id", identity.node_id.as_str())?;
+        let ledger = self.ledger_store()?;
+        let input = LedgerOperationInput {
+            operation_id: format!(
+                "hop_{}",
+                valhall_config::ids::generate_entropy_prefixed_ulid()
+            ),
+            cluster_id: cluster_id.to_string(),
+            node_id: identity.node_id.clone(),
+            node_seq: ledger.node_high_watermark(identity.node_id.as_str())? + 1,
+            op_type: op_type.to_string(),
+            payload_json,
+            created_at,
+        };
+        let envelope = ledger.sign_next(identity, input)?;
+        ledger.append_signed(&envelope)
+    }
+
+    pub fn migrate_local_store_to_ledger(
+        &self,
+        input: LocalStoreLedgerMigrationInput<'_>,
+    ) -> Result<LocalStoreLedgerMigrationReport> {
+        normalize_subject("cluster_id", input.cluster_id)?;
+        normalize_subject("node_id", input.identity.node_id.as_str())?;
+        let (planned, mut report) = self
+            .plan_local_store_ledger_migration(input.cluster_id, input.identity.node_id.as_str())?;
+        report.dry_run = input.dry_run;
+
+        if input.dry_run {
+            return Ok(report);
+        }
+
+        let ledger = self.ledger_store()?;
+        let start_position = ledger.latest_position()?;
+        report.ledger_start_position = start_position;
+        if start_position != 0 {
+            return Err(HemError::InvalidArgument(format!(
+                "local store ledger migration requires an empty distributed ledger; found {start_position} existing operations"
+            )));
+        }
+
+        let mut node_seq = ledger.node_high_watermark(input.identity.node_id.as_str())? + 1;
+        for operation in planned {
+            let signed = ledger.sign_next(
+                input.identity,
+                LedgerOperationInput {
+                    operation_id: format!(
+                        "hop_{}",
+                        valhall_config::ids::generate_entropy_prefixed_ulid()
+                    ),
+                    cluster_id: input.cluster_id.to_string(),
+                    node_id: input.identity.node_id.clone(),
+                    node_seq,
+                    op_type: operation.op_type,
+                    payload_json: operation.payload_json,
+                    created_at: operation.created_at,
+                },
+            )?;
+            ledger.append_signed(&signed)?;
+            node_seq += 1;
+            report.operations_appended += 1;
+        }
+        ledger.materialize_secret_metadata()?;
+        ledger.materialize_secret_value_versions()?;
+        report.ledger_end_position = ledger.latest_position()?;
+        Ok(report)
+    }
+
+    pub fn rewrap_latest_ledger_values_for_nodes(
+        &self,
+        input: LedgerValueRewrapInput<'_>,
+    ) -> Result<LedgerValueRewrapReport> {
+        normalize_subject("cluster_id", input.cluster_id)?;
+        normalize_subject("node_id", input.identity.node_id.as_str())?;
+        if input.recipients.is_empty() {
+            return Err(HemError::InvalidArgument(
+                "at least one node key recipient is required".to_string(),
+            ));
+        }
+
+        let ledger = self.ledger_store()?;
+        ledger.materialize_secret_value_versions()?;
+        let start_position = ledger.latest_position()?;
+        let mut report = LedgerValueRewrapReport {
+            dry_run: input.dry_run,
+            cluster_id: input.cluster_id.to_string(),
+            node_id: input.identity.node_id.clone(),
+            ledger_start_position: start_position,
+            ledger_end_position: start_position,
+            values_scanned: 0,
+            values_rewrapped: 0,
+            values_already_current: 0,
+            operations_planned: 0,
+            operations_appended: 0,
+            unsupported_records: Vec::new(),
+        };
+
+        let latest = ledger.list_latest_secret_value_versions_for_cluster(input.cluster_id)?;
+        let mut grouped: BTreeMap<(String, String, i64), BTreeMap<String, Value>> = BTreeMap::new();
+        for version in latest {
+            report.values_scanned += 1;
+            match self.rewrap_latest_ledger_value(&version, input.identity, input.recipients) {
+                Ok(Some(encrypted)) => {
+                    grouped
+                        .entry((
+                            version.scope.clone(),
+                            version.name.clone(),
+                            version.version_seq,
+                        ))
+                        .or_default()
+                        .insert(version.key.clone(), serde_json::to_value(encrypted)?);
+                    report.values_rewrapped += 1;
+                }
+                Ok(None) => {
+                    report.values_already_current += 1;
+                }
+                Err(err) => {
+                    report.unsupported_records.push(format!(
+                        "{}/{}/{}: {err}",
+                        version.scope, version.name, version.key
+                    ));
+                }
+            }
+        }
+        report.operations_planned = grouped.len();
+
+        if input.dry_run {
+            return Ok(report);
+        }
+
+        let actor = normalize_actor(input.actor);
+        for ((scope, name, base_version_seq), values) in grouped {
+            let payload = json!({
+                "source": "hem-ledger-rewrap",
+                "key_model": "node-envelope-v1",
+                "scope": scope.as_str(),
+                "name": name.as_str(),
+                "values": values,
+                "base_version_seq": base_version_seq,
+                "actor": actor.as_str(),
+            });
+            self.append_signed_ledger_operation(
+                input.cluster_id,
+                input.identity,
+                "secret.value.set",
+                payload,
+                Utc::now(),
+            )?;
+            report.operations_appended += 1;
+        }
+        ledger.materialize_secret_value_versions()?;
+        report.ledger_end_position = ledger.latest_position()?;
+        Ok(report)
+    }
+
+    fn rewrap_latest_ledger_value(
+        &self,
+        version: &LedgerSecretValueVersion,
+        identity: &NodeIdentity,
+        recipients: &[NodeKeyRecipient],
+    ) -> Result<Option<EnvelopeEncryptedValue>> {
+        if let Ok(envelope) =
+            serde_json::from_value::<EnvelopeEncryptedValue>(version.encrypted_value_json.clone())
+        {
+            if envelope_has_all_recipients(&envelope, recipients) {
+                return Ok(None);
+            }
+            let private_key = identity.wrap_private_key_b64.as_deref().ok_or_else(|| {
+                HemError::InvalidArgument(format!(
+                    "node {} cannot decrypt node-envelope value without wrap private key",
+                    identity.node_id
+                ))
+            })?;
+            let aad = ledger_value_aad(version);
+            let plain = envelope_decrypt_for_node(
+                &envelope,
+                aad.as_bytes(),
+                identity.node_id.as_str(),
+                private_key,
+            )?;
+            return envelope_encrypt_for_nodes(plain.as_str(), aad.as_bytes(), recipients)
+                .map(Some);
+        }
+
+        let encrypted: EncryptedValue =
+            serde_json::from_value(version.encrypted_value_json.clone())?;
+        let decrypt_key = self.master_keyset.key_by_id(encrypted.key_id.as_str())?;
+        let aad = ledger_value_aad(version);
+        let plain = decrypt_value(decrypt_key, &encrypted, aad.as_bytes())?;
+        envelope_encrypt_for_nodes(plain.as_str(), aad.as_bytes(), recipients).map(Some)
+    }
+
     pub fn token_manager(&self) -> Result<TokenManager> {
         let primary = self.master_keyset.primary()?;
         TokenManager::from_master_key(
@@ -288,7 +696,6 @@ impl HemStore {
                 .filter(|item| !item.is_empty())
                 .unwrap_or_else(|| "unknown".to_string()),
         );
-        file.info.updated_at = Utc::now();
         write_json_atomic(path.as_path(), &file)?;
 
         Ok(SecretWithValues {
@@ -528,6 +935,16 @@ impl HemStore {
     }
 
     pub fn import_secrets_bundle(&self, bundle: &[u8], merge: bool) -> Result<u32> {
+        Ok(self
+            .import_secrets_bundle_with_report(bundle, merge)?
+            .imported_secret_count)
+    }
+
+    pub fn import_secrets_bundle_with_report(
+        &self,
+        bundle: &[u8],
+        merge: bool,
+    ) -> Result<ImportSecretsReport> {
         if bundle.is_empty() {
             return Err(HemError::InvalidArgument(
                 "encrypted_bundle must not be empty".to_string(),
@@ -549,6 +966,7 @@ impl HemStore {
         }
 
         let mut imported = 0_u32;
+        let mut imported_secrets = Vec::new();
         for mut item in parsed.secrets {
             item.info.validate()?;
             if let Some(group) = item.info.group.as_ref() {
@@ -559,10 +977,152 @@ impl HemStore {
                 continue;
             }
             item.info.updated_at = Utc::now();
+            let info = item.info.clone();
             write_json_atomic(path.as_path(), &item)?;
             imported = imported.saturating_add(1);
+            imported_secrets.push(info);
         }
-        Ok(imported)
+        Ok(ImportSecretsReport {
+            imported_secret_count: imported,
+            imported_secrets,
+        })
+    }
+
+    fn plan_local_store_ledger_migration(
+        &self,
+        cluster_id: &str,
+        node_id: &str,
+    ) -> Result<(Vec<PlannedLedgerOperation>, LocalStoreLedgerMigrationReport)> {
+        let mut planned = Vec::new();
+        let mut report = LocalStoreLedgerMigrationReport {
+            dry_run: true,
+            cluster_id: cluster_id.to_string(),
+            node_id: node_id.to_string(),
+            ledger_start_position: 0,
+            ledger_end_position: 0,
+            groups_scanned: 0,
+            secrets_scanned: 0,
+            value_keys_scanned: 0,
+            grants_scanned: 0,
+            group_operations: 0,
+            metadata_operations: 0,
+            value_operations: 0,
+            grant_operations: 0,
+            operations_planned: 0,
+            operations_appended: 0,
+            unsupported_records: Vec::new(),
+        };
+
+        for group in self.group_store()?.list_groups()? {
+            report.groups_scanned += 1;
+            report.group_operations += 1;
+            planned.push(PlannedLedgerOperation {
+                op_type: "group.set".to_string(),
+                created_at: group.updated_at,
+                payload_json: json!({
+                    "source": "hem-v1-local-store",
+                    "name": group.name,
+                    "description": group.description,
+                    "created_at": group.created_at.to_rfc3339(),
+                    "updated_at": group.updated_at.to_rfc3339(),
+                    "actor": node_id,
+                }),
+            });
+        }
+
+        let mut secrets = self.list_secrets(None)?;
+        secrets.sort_by(|left, right| {
+            scope_label(&left.scope)
+                .cmp(&scope_label(&right.scope))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+
+        for info in secrets {
+            report.secrets_scanned += 1;
+            let path = self.secret_file_path(&info.scope, info.name.as_str());
+            let file = read_secret_file(path.as_path())?;
+            let scope = scope_label(&info.scope);
+            let actor = if info.created_by.trim().is_empty() {
+                node_id.to_string()
+            } else {
+                info.created_by.clone()
+            };
+
+            report.metadata_operations += 1;
+            planned.push(PlannedLedgerOperation {
+                op_type: "secret.metadata.set".to_string(),
+                created_at: info.updated_at,
+                payload_json: json!({
+                    "source": "hem-v1-local-store",
+                    "scope": scope.as_str(),
+                    "name": info.name.as_str(),
+                    "description": info.description.as_str(),
+                    "requires_approval": info.requires_approval,
+                    "group": info.group.as_deref(),
+                    "created_at": info.created_at.to_rfc3339(),
+                    "updated_at": info.updated_at.to_rfc3339(),
+                    "created_by": info.created_by.as_str(),
+                    "last_accessed_at": info.last_accessed_at.map(|value| value.to_rfc3339()),
+                    "last_accessed_by": info.last_accessed_by.as_deref(),
+                    "actor": actor.as_str(),
+                }),
+            });
+
+            if file.values.is_empty() {
+                report.unsupported_records.push(format!(
+                    "secret {}/{} has no encrypted values",
+                    scope, file.info.name
+                ));
+            } else {
+                report.value_keys_scanned += file.values.len();
+                report.value_operations += 1;
+                planned.push(PlannedLedgerOperation {
+                    op_type: "secret.value.set".to_string(),
+                    created_at: file.info.updated_at,
+                    payload_json: json!({
+                        "source": "hem-v1-local-store",
+                        "scope": scope.as_str(),
+                        "name": file.info.name.as_str(),
+                        "values": encrypted_values_json(&file.values)?,
+                        "base_version_seq": 0,
+                        "actor": actor.as_str(),
+                    }),
+                });
+            }
+
+            let grants = self.list_grants(&file.info.scope, file.info.name.as_str())?;
+            for grant in grants {
+                report.grants_scanned += 1;
+                report.grant_operations += 1;
+                planned.push(PlannedLedgerOperation {
+                    op_type: "grant.access".to_string(),
+                    created_at: grant.created_at,
+                    payload_json: json!({
+                        "source": "hem-v1-local-store",
+                        "scope": scope.as_str(),
+                        "name": file.info.name.as_str(),
+                        "grantee_scope": scope_label(&grant.grantee_scope),
+                        "grantee_id": grant.grantee_id.as_str(),
+                        "created_at": grant.created_at.to_rfc3339(),
+                        "created_by": grant.created_by.as_str(),
+                        "actor": grant.created_by.as_str(),
+                    }),
+                });
+            }
+        }
+
+        planned.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.op_type.cmp(&right.op_type))
+                .then_with(|| {
+                    left.payload_json
+                        .to_string()
+                        .cmp(&right.payload_json.to_string())
+                })
+        });
+        report.operations_planned = planned.len();
+        Ok((planned, report))
     }
 
     pub fn rotate_master_key(&self) -> Result<(String, u32)> {
@@ -827,9 +1387,126 @@ impl HemStore {
     }
 }
 
+pub fn inspect_data_dir_security(data_dir: impl AsRef<Path>) -> Result<HemDataDirSecurityReport> {
+    let mut issues = Vec::new();
+    inspect_data_dir_path(data_dir.as_ref(), &mut issues)?;
+    Ok(HemDataDirSecurityReport {
+        ok: issues.is_empty(),
+        issues,
+    })
+}
+
+#[cfg(unix)]
+fn inspect_data_dir_path(path: &Path, issues: &mut Vec<HemDataDirSecurityIssue>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::symlink_metadata(path)?;
+    let mode = metadata.permissions().mode() & 0o777;
+    let file_type = metadata.file_type();
+
+    if file_type.is_symlink() {
+        issues.push(HemDataDirSecurityIssue {
+            path: path.to_path_buf(),
+            kind: "symlink".to_string(),
+            mode: Some(mode),
+            message: "data-dir symlinks are not followed and cannot provide retrieval certainty"
+                .to_string(),
+        });
+        return Ok(());
+    }
+
+    if file_type.is_dir() {
+        if mode & 0o077 != 0 {
+            issues.push(HemDataDirSecurityIssue {
+                path: path.to_path_buf(),
+                kind: "broad_directory_permissions".to_string(),
+                mode: Some(mode),
+                message: "directory allows group or other access; expected owner-only access"
+                    .to_string(),
+            });
+        }
+
+        let mut entries = fs::read_dir(path)?.collect::<std::result::Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
+            inspect_data_dir_path(entry.path().as_path(), issues)?;
+        }
+        return Ok(());
+    }
+
+    if file_type.is_file() {
+        if mode & 0o077 != 0 {
+            issues.push(HemDataDirSecurityIssue {
+                path: path.to_path_buf(),
+                kind: "broad_file_permissions".to_string(),
+                mode: Some(mode),
+                message: "file allows group or other access; expected owner-only access"
+                    .to_string(),
+            });
+        }
+        return Ok(());
+    }
+
+    issues.push(HemDataDirSecurityIssue {
+        path: path.to_path_buf(),
+        kind: "special_file".to_string(),
+        mode: Some(mode),
+        message: "data-dir contains a non-regular file that cannot be audited as a vault file"
+            .to_string(),
+    });
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn inspect_data_dir_path(path: &Path, _issues: &mut Vec<HemDataDirSecurityIssue>) -> Result<()> {
+    let _ = fs::metadata(path)?;
+    Ok(())
+}
+
 fn read_secret_file(path: &Path) -> Result<SecretFile> {
     let body = fs::read_to_string(path)?;
     Ok(serde_json::from_str(body.as_str())?)
+}
+
+fn encrypted_values_json(values: &HashMap<String, EncryptedValue>) -> Result<Value> {
+    let mut sorted = BTreeMap::new();
+    for (key, value) in values {
+        sorted.insert(key.as_str(), value);
+    }
+    Ok(serde_json::to_value(sorted)?)
+}
+
+fn envelope_values_json(
+    store: &HemStore,
+    scope: &SecretScope,
+    name: &str,
+    values: &HashMap<String, EncryptedValue>,
+    recipients: &[NodeKeyRecipient],
+) -> Result<Value> {
+    let mut sorted = BTreeMap::new();
+    for (key, value) in values {
+        let plain = store.decrypt_secret_value(scope, name, key.as_str(), value)?;
+        let aad = store.value_aad(scope, name, key.as_str());
+        let encrypted = envelope_encrypt_for_nodes(plain.as_str(), aad.as_bytes(), recipients)?;
+        sorted.insert(key.as_str(), encrypted);
+    }
+    Ok(serde_json::to_value(sorted)?)
+}
+
+fn ledger_value_aad(version: &LedgerSecretValueVersion) -> String {
+    format!("{}:{}:{}", version.scope, version.name, version.key)
+}
+
+fn envelope_has_all_recipients(
+    envelope: &EnvelopeEncryptedValue,
+    recipients: &[NodeKeyRecipient],
+) -> bool {
+    recipients.iter().all(|recipient| {
+        envelope.wraps.iter().any(|wrap| {
+            wrap.node_id == recipient.node_id
+                && wrap.recipient_public_key_b64 == recipient.public_key_b64
+        })
+    })
 }
 
 fn read_master_key_file(path: &Path) -> Result<MasterKeySet> {
@@ -939,24 +1616,28 @@ fn store_lock_path(data_dir: &Path) -> PathBuf {
 }
 
 fn ensure_layout(data_dir: &Path) -> Result<()> {
-    fs::create_dir_all(data_dir.join("secrets").join("global"))?;
-    fs::create_dir_all(data_dir.join("secrets").join("project"))?;
-    fs::create_dir_all(data_dir.join("secrets").join("identity"))?;
-    fs::create_dir_all(data_dir.join("groups"))?;
-    fs::create_dir_all(data_dir.join("grants"))?;
-    fs::create_dir_all(data_dir.join("tokens"))?;
-    fs::create_dir_all(data_dir.join("approvals").join("pending"))?;
-    fs::create_dir_all(data_dir.join("approvals").join("resolved"))?;
-    fs::create_dir_all(data_dir.join("service-tokens"))?;
-    fs::create_dir_all(data_dir.join("audit"))?;
-    fs::create_dir_all(data_dir.join("rotation"))?;
-    fs::create_dir_all(data_dir.join("locks"))?;
+    ensure_private_dir(data_dir)?;
+    ensure_private_dir(data_dir.join("secrets").as_path())?;
+    ensure_private_dir(data_dir.join("secrets").join("global").as_path())?;
+    ensure_private_dir(data_dir.join("secrets").join("project").as_path())?;
+    ensure_private_dir(data_dir.join("secrets").join("identity").as_path())?;
+    ensure_private_dir(data_dir.join("groups").as_path())?;
+    ensure_private_dir(data_dir.join("grants").as_path())?;
+    ensure_private_dir(data_dir.join("tokens").as_path())?;
+    ensure_private_dir(data_dir.join("approvals").as_path())?;
+    ensure_private_dir(data_dir.join("approvals").join("pending").as_path())?;
+    ensure_private_dir(data_dir.join("approvals").join("resolved").as_path())?;
+    ensure_private_dir(data_dir.join("service-tokens").as_path())?;
+    ensure_private_dir(data_dir.join("audit").as_path())?;
+    ensure_private_dir(data_dir.join("distributed").as_path())?;
+    ensure_private_dir(data_dir.join("rotation").as_path())?;
+    ensure_private_dir(data_dir.join("locks").as_path())?;
     Ok(())
 }
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        ensure_private_dir(parent)?;
     }
     let temp = path.with_extension(format!(
         "tmp-{}.json",
@@ -964,7 +1645,9 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     ));
     let body = serde_json::to_vec_pretty(value)?;
     fs::write(temp.as_path(), body)?;
+    set_owner_read_write_only(temp.as_path())?;
     fs::rename(temp.as_path(), path)?;
+    set_owner_read_write_only(path)?;
     Ok(())
 }
 
@@ -1009,17 +1692,6 @@ where
     }
     let body = fs::read_to_string(path)?;
     Ok(serde_json::from_str(body.as_str())?)
-}
-
-fn set_owner_read_write_only(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(path, perms)?;
-    }
-    Ok(())
 }
 
 fn ensure_master_key_permissions(path: &Path) -> Result<()> {
@@ -1072,6 +1744,244 @@ mod tests {
             Some(&"sk-test-123".to_string())
         );
         assert_eq!(secret.values.get("org"), Some(&"acme".to_string()));
+    }
+
+    #[test]
+    fn live_secret_set_appends_signed_metadata_and_encrypted_value_operations() {
+        let root = tempfile::tempdir().expect("tempdir");
+        HemStore::init(root.path(), false).expect("init");
+        let store = HemStore::open(root.path()).expect("open");
+        let identity = NodeIdentity::generate("hmn_live", "live").expect("identity");
+
+        store
+            .set_secret(SetSecretInput {
+                scope: SecretScope::Global,
+                name: "live-prod".to_string(),
+                values: HashMap::from([("api_key".to_string(), "sk-live-secret".to_string())]),
+                description: "live prod".to_string(),
+                requires_approval: false,
+                group: None,
+                actor: "tester".to_string(),
+            })
+            .expect("set");
+
+        let operations = store
+            .append_secret_set_to_ledger(
+                "hmc_live",
+                &identity,
+                &SecretScope::Global,
+                "live-prod",
+                "tester",
+            )
+            .expect("append live set");
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0].op_type, "secret.metadata.set");
+        assert_eq!(operations[1].op_type, "secret.value.set");
+        assert_eq!(operations[1].payload_json["base_version_seq"], 0);
+        assert!(!operations[1]
+            .payload_json
+            .to_string()
+            .contains("sk-live-secret"));
+
+        let report = store
+            .ledger_store()
+            .expect("ledger")
+            .verify_integrity()
+            .expect("verify");
+        assert!(report.ok, "{report:?}");
+    }
+
+    #[test]
+    fn live_secret_set_can_write_node_envelope_ledger_values() {
+        let root = tempfile::tempdir().expect("tempdir");
+        HemStore::init(root.path(), false).expect("init");
+        let store = HemStore::open(root.path()).expect("open");
+        let identity = NodeIdentity::generate("hmn_live", "live").expect("identity");
+
+        store
+            .set_secret(SetSecretInput {
+                scope: SecretScope::Global,
+                name: "wrapped-prod".to_string(),
+                values: HashMap::from([("api_key".to_string(), "sk-wrapped".to_string())]),
+                description: "wrapped prod".to_string(),
+                requires_approval: false,
+                group: None,
+                actor: "tester".to_string(),
+            })
+            .expect("set");
+        let recipient = NodeKeyRecipient {
+            node_id: identity.node_id.clone(),
+            public_key_b64: identity.wrap_public_key_b64.clone().expect("wrap public"),
+        };
+        let operations = store
+            .append_secret_set_to_ledger_for_nodes(
+                "hmc_live",
+                &identity,
+                &SecretScope::Global,
+                "wrapped-prod",
+                "tester",
+                &[recipient],
+            )
+            .expect("append wrapped");
+        let encrypted = operations[1].payload_json["values"]["api_key"].clone();
+        let envelope: crate::crypto::EnvelopeEncryptedValue =
+            serde_json::from_value(encrypted).expect("envelope");
+        assert_eq!(envelope.alg, "hem-node-envelope-v1");
+        let plain = crate::crypto::envelope_decrypt_for_node(
+            &envelope,
+            store
+                .value_aad(&SecretScope::Global, "wrapped-prod", "api_key")
+                .as_bytes(),
+            identity.node_id.as_str(),
+            identity
+                .wrap_private_key_b64
+                .as_deref()
+                .expect("wrap private"),
+        )
+        .expect("decrypt envelope");
+        assert_eq!(plain, "sk-wrapped");
+
+        let report = store
+            .ledger_store()
+            .expect("ledger")
+            .verify_integrity()
+            .expect("verify");
+        assert!(report.ok, "{report:?}");
+    }
+
+    #[test]
+    fn rewrap_latest_local_master_ledger_values_for_all_cluster_nodes() {
+        let root = tempfile::tempdir().expect("tempdir");
+        HemStore::init(root.path(), false).expect("init");
+        let store = HemStore::open(root.path()).expect("open");
+        let identity = NodeIdentity::generate("hmn_master", "master").expect("identity");
+        let peer = NodeIdentity::generate("hmn_new_node", "new node").expect("peer");
+
+        store
+            .set_secret(SetSecretInput {
+                scope: SecretScope::Global,
+                name: "legacy-prod".to_string(),
+                values: HashMap::from([("api_key".to_string(), "sk-legacy".to_string())]),
+                description: "legacy prod".to_string(),
+                requires_approval: false,
+                group: None,
+                actor: "tester".to_string(),
+            })
+            .expect("set");
+        store
+            .append_secret_set_to_ledger(
+                "hmc_live",
+                &identity,
+                &SecretScope::Global,
+                "legacy-prod",
+                "tester",
+            )
+            .expect("append legacy local-master value");
+
+        let report = store
+            .rewrap_latest_ledger_values_for_nodes(LedgerValueRewrapInput {
+                cluster_id: "hmc_live",
+                identity: &identity,
+                actor: "operator",
+                recipients: &[
+                    NodeKeyRecipient {
+                        node_id: identity.node_id.clone(),
+                        public_key_b64: identity.wrap_public_key_b64.clone().expect("wrap public"),
+                    },
+                    NodeKeyRecipient {
+                        node_id: peer.node_id.clone(),
+                        public_key_b64: peer.wrap_public_key_b64.clone().expect("peer wrap"),
+                    },
+                ],
+                dry_run: false,
+            })
+            .expect("rewrap");
+
+        assert_eq!(report.values_rewrapped, 1);
+        assert_eq!(report.operations_appended, 1);
+        assert_eq!(report.values_already_current, 0);
+        assert!(report.unsupported_records.is_empty());
+
+        let ledger = store.ledger_store().expect("ledger");
+        ledger
+            .materialize_secret_value_versions()
+            .expect("materialize");
+        let versions = ledger
+            .list_secret_value_versions("hmc_live", "global", "legacy-prod", "api_key")
+            .expect("versions");
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[1].base_version_seq, 1);
+
+        let envelope: crate::crypto::EnvelopeEncryptedValue =
+            serde_json::from_value(versions[1].encrypted_value_json.clone()).expect("envelope");
+        assert_eq!(envelope.alg, "hem-node-envelope-v1");
+        assert!(envelope
+            .wraps
+            .iter()
+            .any(|wrap| wrap.node_id == identity.node_id));
+        assert!(envelope
+            .wraps
+            .iter()
+            .any(|wrap| wrap.node_id == peer.node_id));
+        let plain = crate::crypto::envelope_decrypt_for_node(
+            &envelope,
+            store
+                .value_aad(&SecretScope::Global, "legacy-prod", "api_key")
+                .as_bytes(),
+            peer.node_id.as_str(),
+            peer.wrap_private_key_b64.as_deref().expect("peer private"),
+        )
+        .expect("peer decrypts rewrapped value");
+        assert_eq!(plain, "sk-legacy");
+
+        let integrity = ledger.verify_integrity().expect("verify");
+        assert!(integrity.ok, "{integrity:?}");
+    }
+
+    #[test]
+    fn live_mutation_event_operations_verify_payload_schema() {
+        let root = tempfile::tempdir().expect("tempdir");
+        HemStore::init(root.path(), false).expect("init");
+        let store = HemStore::open(root.path()).expect("open");
+        let identity = NodeIdentity::generate("hmn_live", "live").expect("identity");
+
+        for (op_type, payload) in [
+            (
+                "group.set",
+                json!({"name": "ops", "description": "ops", "actor": "tester"}),
+            ),
+            (
+                "grant.access",
+                json!({"scope": "global", "name": "live-prod", "grantee_scope": "global", "grantee_id": "smi", "actor": "tester"}),
+            ),
+            (
+                "grant.revoked",
+                json!({"scope": "global", "name": "live-prod", "grantee_scope": "global", "grantee_id": "smi", "actor": "tester"}),
+            ),
+            (
+                "secret.deleted",
+                json!({"scope": "global", "name": "live-prod", "actor": "tester"}),
+            ),
+            (
+                "secrets.imported",
+                json!({"actor": "tester", "imported_secret_count": 1_u32}),
+            ),
+            (
+                "master_key.rotated",
+                json!({"actor": "tester", "new_key_id": "mk_new", "rotated_secret_count": 1_u32}),
+            ),
+        ] {
+            store
+                .append_signed_ledger_operation("hmc_live", &identity, op_type, payload, Utc::now())
+                .expect("append event");
+        }
+
+        let report = store
+            .ledger_store()
+            .expect("ledger")
+            .verify_integrity()
+            .expect("verify");
+        assert!(report.ok, "{report:?}");
     }
 
     #[test]
@@ -1264,6 +2174,63 @@ mod tests {
             let err = HemStore::open(root.path()).expect_err("must reject weak perms");
             assert!(matches!(err, HemError::InsecureMasterKeyPermissions(_)));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_dir_security_report_flags_broad_permissions_and_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().expect("tempdir");
+        HemStore::init(root.path(), false).expect("init");
+
+        let broad_file = root
+            .path()
+            .join("secrets")
+            .join("global")
+            .join("leaky.json");
+        fs::write(broad_file.as_path(), "{}").expect("write leaky file");
+        fs::set_permissions(broad_file.as_path(), fs::Permissions::from_mode(0o644))
+            .expect("chmod leaky file");
+
+        let broad_dir = root.path().join("secrets").join("project").join("shared");
+        fs::create_dir_all(broad_dir.as_path()).expect("create broad dir");
+        fs::set_permissions(broad_dir.as_path(), fs::Permissions::from_mode(0o755))
+            .expect("chmod broad dir");
+
+        let link_path = root
+            .path()
+            .join("secrets")
+            .join("global")
+            .join("linked.json");
+        symlink(broad_file.as_path(), link_path.as_path()).expect("symlink");
+
+        let report = inspect_data_dir_security(root.path()).expect("inspect security");
+        assert!(!report.ok, "{report:?}");
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.path.ends_with("secrets/global/leaky.json")
+                    && issue.mode == Some(0o644)),
+            "{report:?}"
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.path.ends_with("secrets/project/shared")
+                    && issue.mode == Some(0o755)),
+            "{report:?}"
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.path.ends_with("secrets/global/linked.json")
+                    && issue.kind == "symlink"),
+            "{report:?}"
+        );
     }
 
     #[test]

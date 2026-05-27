@@ -3,7 +3,11 @@ use std::{fs, path::PathBuf};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::{model::validate_group_name, GroupInfo, HemError, Result};
+use crate::{
+    fs_security::{ensure_private_dir, set_owner_read_write_only},
+    model::validate_group_name,
+    GroupInfo, HemError, Result,
+};
 
 #[derive(Debug, Clone)]
 pub struct GroupStore {
@@ -18,7 +22,7 @@ struct GroupFile {
 impl GroupStore {
     pub fn open(data_dir: impl Into<PathBuf>) -> Result<Self> {
         let groups_dir = data_dir.into().join("groups");
-        fs::create_dir_all(groups_dir.as_path())?;
+        ensure_private_dir(groups_dir.as_path())?;
         Ok(Self { groups_dir })
     }
 
@@ -78,7 +82,7 @@ impl GroupStore {
 
 fn write_json_atomic<T: Serialize>(path: &std::path::Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        ensure_private_dir(parent)?;
     }
     let temp = path.with_extension(format!(
         "tmp-{}.json",
@@ -86,7 +90,9 @@ fn write_json_atomic<T: Serialize>(path: &std::path::Path, value: &T) -> Result<
     ));
     let body = serde_json::to_vec_pretty(value)?;
     fs::write(temp.as_path(), body)?;
+    set_owner_read_write_only(temp.as_path())?;
     fs::rename(temp.as_path(), path)?;
+    set_owner_read_write_only(path)?;
     Ok(())
 }
 

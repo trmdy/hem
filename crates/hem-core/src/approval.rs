@@ -6,7 +6,11 @@ use std::{
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{model::ApprovalState, HemError, Result, SecretScope};
+use crate::{
+    fs_security::{ensure_private_dir, set_owner_read_write_only},
+    model::ApprovalState,
+    HemError, Result, SecretScope,
+};
 
 const DELETE_APPROVAL_RECEIPT_TTL_MINS: i64 = 10;
 
@@ -17,6 +21,8 @@ pub struct DeleteApprovalRecord {
     pub state: ApprovalState,
     pub secret_scope: SecretScope,
     pub secret_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_version: Option<String>,
     pub requested_by: String,
     pub reason: String,
     pub created_at: DateTime<Utc>,
@@ -40,8 +46,9 @@ impl DeleteApprovalStore {
         let approvals_root = data_dir.into().join("approvals");
         let pending_dir = approvals_root.join("pending");
         let resolved_dir = approvals_root.join("resolved");
-        fs::create_dir_all(pending_dir.as_path())?;
-        fs::create_dir_all(resolved_dir.as_path())?;
+        ensure_private_dir(approvals_root.as_path())?;
+        ensure_private_dir(pending_dir.as_path())?;
+        ensure_private_dir(resolved_dir.as_path())?;
         Ok(Self {
             pending_dir,
             resolved_dir,
@@ -74,8 +81,31 @@ impl DeleteApprovalStore {
         reason: &str,
         default_reason: &str,
     ) -> Result<DeleteApprovalRecord> {
+        self.request_action_for_version(
+            secret_scope,
+            secret_name,
+            None,
+            action,
+            requested_by,
+            reason,
+            default_reason,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_action_for_version(
+        &self,
+        secret_scope: SecretScope,
+        secret_name: String,
+        secret_version: Option<&str>,
+        action: &str,
+        requested_by: &str,
+        reason: &str,
+        default_reason: &str,
+    ) -> Result<DeleteApprovalRecord> {
         secret_scope.validate()?;
         let secret_name = normalize_secret_name(secret_name.as_str())?.to_string();
+        let secret_version = normalize_optional_version(secret_version)?;
         let action = normalize_action(action)?.to_string();
         let reason = normalize_reason(reason, default_reason);
         let requested_by = normalize_actor(requested_by);
@@ -83,7 +113,9 @@ impl DeleteApprovalStore {
         if let Some(existing) = self.find_pending_by_secret_action(
             &secret_scope,
             secret_name.as_str(),
+            secret_version.as_deref(),
             action.as_str(),
+            requested_by.as_str(),
         )? {
             return Ok(existing);
         }
@@ -95,6 +127,7 @@ impl DeleteApprovalStore {
             state: ApprovalState::Pending,
             secret_scope,
             secret_name,
+            secret_version,
             requested_by,
             reason,
             created_at: now,
@@ -196,8 +229,21 @@ impl DeleteApprovalStore {
         receipt: &str,
         actor: &str,
     ) -> Result<String> {
+        self.consume_receipt_for_version(secret_scope, secret_name, None, action, receipt, actor)
+    }
+
+    pub fn consume_receipt_for_version(
+        &self,
+        secret_scope: &SecretScope,
+        secret_name: &str,
+        secret_version: Option<&str>,
+        action: &str,
+        receipt: &str,
+        actor: &str,
+    ) -> Result<String> {
         secret_scope.validate()?;
         let secret_name = normalize_secret_name(secret_name)?;
+        let secret_version = normalize_optional_version(secret_version)?;
         let action = normalize_action(action)?;
         let receipt = normalize_receipt(receipt)?;
         let actor = normalize_actor(actor);
@@ -219,6 +265,12 @@ impl DeleteApprovalStore {
             return Err(HemError::ApprovalReceiptInvalid);
         }
         if record.action.as_str() != action {
+            return Err(HemError::ApprovalReceiptInvalid);
+        }
+        if record.requested_by != actor {
+            return Err(HemError::ApprovalReceiptInvalid);
+        }
+        if record.secret_version != secret_version {
             return Err(HemError::ApprovalReceiptInvalid);
         }
         let expected = record
@@ -250,13 +302,17 @@ impl DeleteApprovalStore {
         &self,
         scope: &SecretScope,
         name: &str,
+        version: Option<&str>,
         action: &str,
+        requested_by: &str,
     ) -> Result<Option<DeleteApprovalRecord>> {
         let records = self.list_pending(usize::MAX)?;
         Ok(records.into_iter().find(|item| {
             &item.secret_scope == scope
                 && item.secret_name == name
+                && item.secret_version.as_deref() == version
                 && item.action.as_str() == action
+                && item.requested_by == requested_by
         }))
     }
 
@@ -324,6 +380,22 @@ fn normalize_action(value: &str) -> Result<&str> {
     Ok(trimmed)
 }
 
+fn normalize_optional_version(value: Option<&str>) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed != value {
+        return Err(HemError::InvalidArgument(
+            "secret version must not have leading/trailing whitespace".to_string(),
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 fn parse_request_id_from_receipt(receipt: &str) -> Result<&str> {
     let mut parts = receipt.split(':');
     let version = parts.next().ok_or(HemError::ApprovalReceiptInvalid)?;
@@ -367,7 +439,7 @@ fn read_record(path: &Path) -> Result<DeleteApprovalRecord> {
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        ensure_private_dir(parent)?;
     }
     let temp = path.with_extension(format!(
         "tmp-{}.json",
@@ -375,7 +447,9 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     ));
     let body = serde_json::to_vec_pretty(value)?;
     fs::write(temp.as_path(), body)?;
+    set_owner_read_write_only(temp.as_path())?;
     fs::rename(temp.as_path(), path)?;
+    set_owner_read_write_only(path)?;
     Ok(())
 }
 
@@ -566,5 +640,80 @@ mod tests {
             )
             .expect_err("must reject wrong action");
         assert!(matches!(err, HemError::ApprovalReceiptInvalid));
+    }
+
+    #[test]
+    fn receipt_rejects_wrong_requester_secret_version_and_expiry() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let approvals = DeleteApprovalStore::open(root.path()).expect("store");
+        let request = approvals
+            .request_action_for_version(
+                SecretScope::Global,
+                "openai-prod".to_string(),
+                Some("version-a"),
+                "get_secret",
+                "token:reader",
+                "need read",
+                "read requires approval",
+            )
+            .expect("request");
+
+        let (_resolved, receipt) = approvals
+            .resolve_request(request.request_id.as_str(), true, "human", "approved")
+            .expect("approve");
+        let receipt = receipt.expect("receipt");
+
+        let wrong_requester = approvals
+            .consume_receipt_for_version(
+                &SecretScope::Global,
+                "openai-prod",
+                Some("version-a"),
+                "get_secret",
+                receipt.as_str(),
+                "token:other",
+            )
+            .expect_err("must reject wrong requester");
+        assert!(matches!(wrong_requester, HemError::ApprovalReceiptInvalid));
+
+        let wrong_secret = approvals
+            .consume_receipt_for_version(
+                &SecretScope::Global,
+                "other-prod",
+                Some("version-a"),
+                "get_secret",
+                receipt.as_str(),
+                "token:reader",
+            )
+            .expect_err("must reject wrong secret");
+        assert!(matches!(wrong_secret, HemError::ApprovalReceiptInvalid));
+
+        let wrong_version = approvals
+            .consume_receipt_for_version(
+                &SecretScope::Global,
+                "openai-prod",
+                Some("version-b"),
+                "get_secret",
+                receipt.as_str(),
+                "token:reader",
+            )
+            .expect_err("must reject wrong version");
+        assert!(matches!(wrong_version, HemError::ApprovalReceiptInvalid));
+
+        let resolved_path = approvals.resolved_path(request.request_id.as_str());
+        let mut record = read_record(resolved_path.as_path()).expect("read resolved");
+        record.approval_receipt_expires_at = Some(Utc::now() - Duration::minutes(1));
+        write_json_atomic(resolved_path.as_path(), &record).expect("expire");
+
+        let expired = approvals
+            .consume_receipt_for_version(
+                &SecretScope::Global,
+                "openai-prod",
+                Some("version-a"),
+                "get_secret",
+                receipt.as_str(),
+                "token:reader",
+            )
+            .expect_err("must reject expired receipt");
+        assert!(matches!(expired, HemError::ApprovalReceiptExpired));
     }
 }

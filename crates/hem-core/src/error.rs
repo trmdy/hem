@@ -44,6 +44,8 @@ pub enum HemError {
     Io(#[from] std::io::Error),
     #[error("serde error: {0}")]
     Serde(#[from] serde_json::Error),
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
     #[error("crypto error: {0}")]
     Crypto(String),
 }

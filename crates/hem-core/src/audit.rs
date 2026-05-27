@@ -7,7 +7,10 @@ use std::{
 use chrono::{DateTime, Duration, Utc};
 use fs2::FileExt;
 
-use crate::{AuditEntry, Result, SecretScope};
+use crate::{
+    fs_security::{ensure_private_dir, set_owner_read_write_only},
+    AuditEntry, Result, SecretScope,
+};
 
 const AUDIT_FILE: &str = "entries.jsonl";
 const AUDIT_LOCK_FILE: &str = "entries.lock";
@@ -30,7 +33,7 @@ impl AuditStore {
         retention_days: u64,
     ) -> Result<Self> {
         let audit_dir = data_dir.into().join("audit");
-        fs::create_dir_all(audit_dir.as_path())?;
+        ensure_private_dir(audit_dir.as_path())?;
         Ok(Self {
             path: audit_dir.join(AUDIT_FILE),
             lock_path: audit_dir.join(AUDIT_LOCK_FILE),
@@ -46,6 +49,7 @@ impl AuditStore {
             .create(true)
             .append(true)
             .open(self.path.as_path())?;
+        set_owner_read_write_only(self.path.as_path())?;
         let body = serde_json::to_string(entry)?;
         file.write_all(body.as_bytes())?;
         file.write_all(b"\n")?;
@@ -92,7 +96,7 @@ impl AuditStore {
 
     fn acquire_lock(&self) -> Result<AuditLockGuard> {
         if let Some(parent) = self.lock_path.parent() {
-            fs::create_dir_all(parent)?;
+            ensure_private_dir(parent)?;
         }
         let file = OpenOptions::new()
             .create(true)
@@ -100,6 +104,7 @@ impl AuditStore {
             .read(true)
             .write(true)
             .open(self.lock_path.as_path())?;
+        set_owner_read_write_only(self.lock_path.as_path())?;
         file.lock_exclusive()?;
         Ok(AuditLockGuard { file: Some(file) })
     }
@@ -159,7 +164,7 @@ impl Drop for AuditLockGuard {
 
 fn write_jsonl_atomic(path: &Path, entries: &[AuditEntry]) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        ensure_private_dir(parent)?;
     }
     let temp = path.with_extension(format!(
         "tmp-{}.jsonl",
@@ -171,7 +176,9 @@ fn write_jsonl_atomic(path: &Path, entries: &[AuditEntry]) -> Result<()> {
         body.push('\n');
     }
     fs::write(temp.as_path(), body.as_bytes())?;
+    set_owner_read_write_only(temp.as_path())?;
     fs::rename(temp.as_path(), path)?;
+    set_owner_read_write_only(path)?;
     Ok(())
 }
 

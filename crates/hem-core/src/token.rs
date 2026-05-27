@@ -14,6 +14,7 @@ use subtle::ConstantTimeEq;
 
 use crate::{
     crypto::MasterKey,
+    fs_security::{ensure_private_dir, set_owner_read_write_only},
     model::{resolution_chain, ScopeResolutionContext, SecretScope, TokenClaims, TokenType},
     HemError, Result,
 };
@@ -95,7 +96,7 @@ impl TokenManager {
         sign_key.copy_from_slice(digest.as_slice());
 
         let tokens_dir = data_dir.into().join("tokens");
-        fs::create_dir_all(tokens_dir.as_path())?;
+        ensure_private_dir(tokens_dir.as_path())?;
 
         Ok(Self {
             sign_key,
@@ -469,7 +470,7 @@ where
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        ensure_private_dir(parent)?;
     }
     let temp = path.with_extension(format!(
         "tmp-{}.json",
@@ -477,7 +478,9 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     ));
     let body = serde_json::to_vec_pretty(value)?;
     fs::write(temp.as_path(), body)?;
+    set_owner_read_write_only(temp.as_path())?;
     fs::rename(temp.as_path(), path)?;
+    set_owner_read_write_only(path)?;
     Ok(())
 }
 

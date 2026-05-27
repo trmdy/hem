@@ -20,6 +20,7 @@ valhall-events = { path = "../valhall-events" }
 valhall-net = { path = "../valhall-net" }
 
 [dev-dependencies]
+rusqlite.workspace = true
 tempfile = "3"
 
 [build-dependencies]
