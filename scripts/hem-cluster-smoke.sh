@@ -387,7 +387,7 @@ if [[ -f "\$ledger" ]] && command -v sqlite3 >/dev/null 2>&1; then
   mkdir -p "\$backup_dir/data/distributed"
   backup_ok=0
   for attempt in 1 2 3 4 5; do
-    if sqlite3 "\$ledger" "PRAGMA busy_timeout=5000;" ".backup '\$backup_dir/data/distributed/ledger.sqlite3'"; then
+    if sqlite3 "\$ledger" ".timeout 5000" ".backup '\$backup_dir/data/distributed/ledger.sqlite3'"; then
       backup_ok=1
       break
     fi
@@ -472,7 +472,7 @@ if [[ -f "\$ledger" ]] && command -v sqlite3 >/dev/null 2>&1; then
   query="select count(*) from ledger_operations where op_type='read.fulfilled' and payload_json like '%\"secret_name\":\"\${secret_name}\"%';"
   count=""
   for attempt in 1 2 3 4 5; do
-    if count="\$(sqlite3 "\$ledger" "PRAGMA busy_timeout=5000;" "\$query")"; then
+    if count="\$(sqlite3 "\$ledger" ".timeout 5000" "\$query")"; then
       break
     fi
     sleep "\$attempt"
@@ -526,7 +526,7 @@ if [[ -f "\$ledger" ]] && command -v sqlite3 >/dev/null 2>&1; then
   query="select count(*) from ledger_operations where op_type='read.fulfilled' and payload_json like '%\"secret_name\":\"\${secret_name}\"%';"
   count=""
   for attempt in 1 2 3 4 5; do
-    if count="\$(sqlite3 "\$ledger" "PRAGMA busy_timeout=5000;" "\$query")"; then
+    if count="\$(sqlite3 "\$ledger" ".timeout 5000" "\$query")"; then
       break
     fi
     sleep "\$attempt"
