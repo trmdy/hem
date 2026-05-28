@@ -2469,7 +2469,7 @@ fn cluster_key_recipients(
 }
 
 fn run_cluster_verify(repair: bool) -> Result<i32, Box<dyn std::error::Error>> {
-    let data_dir = resolve_primary_data_dir();
+    let data_dir = resolve_cluster_read_data_dir();
     let ledger = LedgerStore::open(data_dir.as_path())?;
     let repaired_records = if repair {
         ledger.repair_materializers()?
@@ -2665,7 +2665,7 @@ fn run_cluster_replay_fork(
 }
 
 fn run_cluster_collisions() -> Result<i32, Box<dyn std::error::Error>> {
-    let data_dir = resolve_primary_data_dir();
+    let data_dir = resolve_cluster_read_data_dir();
     let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
     if !config_path.exists() {
         print_cluster_kv("collisions", 0);
@@ -3001,7 +3001,7 @@ fn run_cluster_init(
 }
 
 fn run_cluster_status() -> Result<i32, Box<dyn std::error::Error>> {
-    let data_dir = resolve_primary_data_dir();
+    let data_dir = resolve_cluster_read_data_dir();
     let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
     let identity_path = data_dir.join(NODE_IDENTITY_FILE);
     if !config_path.exists() {
@@ -3059,7 +3059,7 @@ fn run_cluster_status() -> Result<i32, Box<dyn std::error::Error>> {
 }
 
 fn run_cluster_health() -> Result<i32, Box<dyn std::error::Error>> {
-    let data_dir = resolve_primary_data_dir();
+    let data_dir = resolve_cluster_read_data_dir();
     let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
     let identity_path = data_dir.join(NODE_IDENTITY_FILE);
     if !config_path.exists() {
@@ -3276,7 +3276,7 @@ fn run_cluster_health() -> Result<i32, Box<dyn std::error::Error>> {
 }
 
 fn run_cluster_peers() -> Result<i32, Box<dyn std::error::Error>> {
-    let data_dir = resolve_primary_data_dir();
+    let data_dir = resolve_cluster_read_data_dir();
     let config_path = data_dir.join(CLUSTER_CONFIG_FILE);
     if !config_path.exists() {
         print_cluster_kv("peers", 0);
@@ -3301,6 +3301,47 @@ fn resolve_primary_data_dir() -> PathBuf {
         return PathBuf::from(home).join(DEFAULT_HEM_SUBDIR);
     }
     PathBuf::from(DEFAULT_HEM_SUBDIR)
+}
+
+fn resolve_cluster_read_data_dir() -> PathBuf {
+    if let Ok(value) = std::env::var("HEM_DATA_DIR") {
+        if let Some(value) = normalize_optional_string(value) {
+            return PathBuf::from(value);
+        }
+    }
+
+    let primary = default_primary_data_dir();
+    if primary.join(CLUSTER_CONFIG_FILE).exists() {
+        return primary;
+    }
+
+    for candidate in system_daemon_data_dir_candidates() {
+        if candidate.join(CLUSTER_CONFIG_FILE).exists() {
+            return candidate;
+        }
+    }
+
+    primary
+}
+
+fn default_primary_data_dir() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(DEFAULT_HEM_SUBDIR);
+    }
+    PathBuf::from(DEFAULT_HEM_SUBDIR)
+}
+
+fn system_daemon_data_dir_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(value) = std::env::var("VALHALL_SYSTEM_DAEMONS_DIR") {
+        if let Some(value) = normalize_optional_string(value) {
+            candidates.push(PathBuf::from(value).join("data/hem"));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(PathBuf::from(home).join(DEFAULT_HEM_SYSTEM_DAEMONS_SUBDIR));
+    }
+    candidates
 }
 
 fn run_policy_command(command: PolicyCommands) -> Result<i32, Box<dyn std::error::Error>> {

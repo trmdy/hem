@@ -219,6 +219,59 @@ fn cluster_peers_do_not_require_daemon() {
 }
 
 #[test]
+fn cluster_peers_falls_back_to_system_daemon_data_dir() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let data_dir = home.path().join(".valhall/system-daemons/data/hem");
+    init_cluster_for_health(data_dir.as_path(), true);
+
+    let peers = Command::new(env!("CARGO_BIN_EXE_hem"))
+        .env("HOME", home.path())
+        .env_remove("HEM_DATA_DIR")
+        .arg("cluster")
+        .arg("peers")
+        .output()
+        .expect("run cluster peers");
+
+    assert!(
+        peers.status.success(),
+        "cluster peers failed: {}",
+        String::from_utf8_lossy(&peers.stderr)
+    );
+    let peers_stdout = String::from_utf8_lossy(&peers.stdout);
+    assert!(peers_stdout.contains("peers=1"), "{peers_stdout}");
+    assert!(peers_stdout.contains("node_id=hmn_peer"), "{peers_stdout}");
+}
+
+#[test]
+fn cluster_status_prefers_primary_data_dir_when_it_has_cluster_config() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let primary_data_dir = home.path().join(".valhall/hem");
+    let daemon_data_dir = home.path().join(".valhall/system-daemons/data/hem");
+    init_cluster_for_health(primary_data_dir.as_path(), false);
+    init_cluster_for_health(daemon_data_dir.as_path(), true);
+
+    let status = Command::new(env!("CARGO_BIN_EXE_hem"))
+        .env("HOME", home.path())
+        .env_remove("HEM_DATA_DIR")
+        .arg("cluster")
+        .arg("status")
+        .output()
+        .expect("run cluster status");
+
+    assert!(
+        status.status.success(),
+        "cluster status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status_stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status_stdout.contains(format!("data_dir={}", primary_data_dir.display()).as_str()),
+        "{status_stdout}"
+    );
+    assert!(status_stdout.contains("peers=0"), "{status_stdout}");
+}
+
+#[test]
 fn policy_and_lease_commands_manage_local_store() {
     let data_dir = tempfile::tempdir().expect("tempdir");
 
