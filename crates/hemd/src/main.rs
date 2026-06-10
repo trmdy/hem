@@ -26,7 +26,8 @@ use hem_core::{
     LedgerCheckpointCosignatureBody as CoreLedgerCheckpointCosignatureBody,
     LedgerOperationBody as CoreLedgerOperationBody,
     LedgerOperationEnvelope as CoreLedgerOperationEnvelope,
-    LedgerOperationInput as CoreLedgerOperationInput, NodeIdentity, NodeKeyRecipient, PeerConfig,
+    LedgerOperationInput as CoreLedgerOperationInput,
+    LedgerSecretMetadata as CoreLedgerSecretMetadata, NodeIdentity, NodeKeyRecipient, PeerConfig,
     ScopeResolutionContext, SecretInfo as CoreSecretInfo, SecretPolicyTier, SecretScope,
     SecretWithValues as CoreSecretWithValues, SetSecretInput, TokenClaims, TokenType,
 };
@@ -34,7 +35,7 @@ use serde::Serialize;
 use tonic::{
     metadata::MetadataMap,
     transport::{Endpoint, Server},
-    Request, Response, Status,
+    Code, Request, Response, Status,
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -92,6 +93,8 @@ const DEFAULT_CLUSTER_SYNC_BATCH_LIMIT: u32 = 1_000;
 const DEFAULT_CLUSTER_SYNC_MAX_BACKOFF_MS: u64 = 30_000;
 const CLUSTER_SYNC_CONNECT_TIMEOUT_SECS: u64 = 3;
 const CLUSTER_SYNC_RPC_TIMEOUT_SECS: u64 = 10;
+const READ_RECEIPT_MASTER_RETRY_ATTEMPTS: usize = 5;
+const READ_RECEIPT_MASTER_RETRY_BACKOFF_MS: u64 = 200;
 const PEER_TRANSPORT_AUTH_CLUSTER_ID_METADATA_KEY: &str = "x-hem-peer-cluster-id";
 const PEER_TRANSPORT_AUTH_NODE_ID_METADATA_KEY: &str = "x-hem-peer-node-id";
 const PEER_TRANSPORT_AUTH_METHOD_METADATA_KEY: &str = "x-hem-peer-method";
@@ -430,6 +433,29 @@ impl HemRuntimeService {
         })
     }
 
+    fn list_distributed_secret_infos(
+        &self,
+        store: &HemStore,
+        scope: Option<&SecretScope>,
+    ) -> Result<Vec<CoreSecretInfo>, Status> {
+        if !self.cluster_runtime.enabled {
+            return Ok(Vec::new());
+        }
+        let (cluster_id, _) = self.require_cluster_identity()?;
+        let ledger = store.ledger_store().map_err(status_from_hem)?;
+        ledger
+            .materialize_secret_metadata()
+            .map_err(status_from_hem)?;
+        let scope_label = scope.map(scope_label);
+        let metadata = ledger
+            .list_materialized_secret_metadata(cluster_id.as_str(), scope_label.as_deref())
+            .map_err(status_from_hem)?;
+        metadata
+            .into_iter()
+            .map(secret_info_from_ledger_metadata)
+            .collect()
+    }
+
     fn resolve_secret_by_name(
         &self,
         store: &HemStore,
@@ -586,7 +612,7 @@ impl HemRuntimeService {
         }
     }
 
-    fn append_signed_read_receipts(
+    async fn append_signed_read_receipts(
         &self,
         store: &HemStore,
         caller: &CallerPrincipal,
@@ -612,28 +638,52 @@ impl HemRuntimeService {
             "hrr_{}",
             valhall_config::ids::generate_entropy_prefixed_ulid()
         );
+        if !self.cluster_runtime.is_master_node() {
+            self.submit_read_receipts_to_master(
+                &ledger,
+                &identity,
+                cluster_id.as_str(),
+                ReadReceiptDraft {
+                    caller,
+                    secret,
+                    policy_decision,
+                    approval_reference,
+                    receipt_id: receipt_id.as_str(),
+                    keys: keys.as_slice(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
         let requested_payload = serde_json::json!({
             "receipt_id": receipt_id,
             "requester": caller.actor.as_str(),
             "token_id": caller.token_id.as_str(),
             "secret_scope": scope_label(&secret.info.scope),
             "secret_name": secret.info.name.as_str(),
-            "keys": keys,
+            "keys": keys.clone(),
             "version": secret.info.updated_at.to_rfc3339(),
             "policy_decision": policy_decision,
             "approval_reference": approval_reference,
             "plaintext_included": false,
         });
-        let requested = self.append_cluster_ledger_operation(
-            &ledger,
+        let node_seq = ledger
+            .node_high_watermark(identity.node_id.as_str())
+            .map_err(status_from_hem)?
+            + 1;
+        let requested_input = self.cluster_ledger_operation_input(
             &identity,
             cluster_id.as_str(),
+            node_seq,
             "read.requested",
             requested_payload,
-        )?;
+        );
+        let requested = ledger
+            .sign_next(&identity, requested_input)
+            .map_err(status_from_hem)?;
         let fulfilled_payload = serde_json::json!({
             "receipt_id": receipt_id,
-            "read_request_operation_id": requested.operation_id,
+            "read_request_operation_id": requested.body.operation_id,
             "requester": caller.actor.as_str(),
             "token_id": caller.token_id.as_str(),
             "secret_scope": scope_label(&secret.info.scope),
@@ -645,41 +695,365 @@ impl HemRuntimeService {
             "released_key_count": secret.values.len(),
             "plaintext_included": false,
         });
-        self.append_cluster_ledger_operation(
-            &ledger,
+        let fulfilled_input = self.cluster_ledger_operation_input(
             &identity,
             cluster_id.as_str(),
+            node_seq + 1,
             "read.fulfilled",
             fulfilled_payload,
-        )?;
+        );
+        let fulfilled = hem_core::LedgerStore::sign_after(
+            &identity,
+            fulfilled_input,
+            requested.body_hash_b64.clone(),
+        )
+        .map_err(status_from_hem)?;
+        self.append_or_confirm_signed(&ledger, &requested)?;
+        self.append_or_confirm_signed(&ledger, &fulfilled)?;
         Ok(())
     }
 
-    fn append_cluster_ledger_operation(
+    fn cluster_ledger_operation_input(
         &self,
-        ledger: &hem_core::LedgerStore,
         identity: &NodeIdentity,
         cluster_id: &str,
+        node_seq: i64,
         op_type: &str,
         payload_json: serde_json::Value,
-    ) -> Result<hem_core::LedgerOperation, Status> {
-        let input = CoreLedgerOperationInput {
+    ) -> CoreLedgerOperationInput {
+        CoreLedgerOperationInput {
             operation_id: format!(
                 "hop_{}",
                 valhall_config::ids::generate_entropy_prefixed_ulid()
             ),
             cluster_id: cluster_id.to_string(),
             node_id: identity.node_id.clone(),
-            node_seq: ledger
-                .node_high_watermark(identity.node_id.as_str())
-                .map_err(status_from_hem)?
-                + 1,
+            node_seq,
             op_type: op_type.to_string(),
             payload_json,
             created_at: Utc::now(),
-        };
-        let envelope = ledger.sign_next(identity, input).map_err(status_from_hem)?;
-        ledger.append_signed(&envelope).map_err(status_from_hem)
+        }
+    }
+
+    fn append_or_confirm_signed(
+        &self,
+        ledger: &hem_core::LedgerStore,
+        envelope: &CoreLedgerOperationEnvelope,
+    ) -> Result<(), Status> {
+        if let Some(existing) = ledger
+            .get_by_operation_id(envelope.body.operation_id.as_str())
+            .map_err(status_from_hem)?
+        {
+            if existing.body_hash_b64 == envelope.body_hash_b64 {
+                return Ok(());
+            }
+            return Err(Status::already_exists(format!(
+                "ledger operation {} already exists with a different hash",
+                envelope.body.operation_id
+            )));
+        }
+        ledger.append_signed(envelope).map_err(status_from_hem)?;
+        Ok(())
+    }
+
+    async fn submit_read_receipts_to_master(
+        &self,
+        ledger: &hem_core::LedgerStore,
+        identity: &NodeIdentity,
+        cluster_id: &str,
+        draft: ReadReceiptDraft<'_>,
+    ) -> Result<(), Status> {
+        let (master_cluster_id, master_identity, master_peer) = self.remote_master_peer()?;
+        if master_cluster_id != cluster_id {
+            return Err(Status::failed_precondition(
+                "remote master cluster_id changed while appending read receipt",
+            ));
+        }
+        if master_identity.node_id != identity.node_id {
+            return Err(Status::failed_precondition(
+                "local node identity changed while appending read receipt",
+            ));
+        }
+        let mut pending_envelopes: Option<Vec<CoreLedgerOperationEnvelope>> = None;
+        let mut last_error: Option<Status> = None;
+        for attempt in 0..READ_RECEIPT_MASTER_RETRY_ATTEMPTS {
+            let mut client = match self.connect_cluster_peer(&master_peer).await {
+                Ok(client) => client,
+                Err(err) => {
+                    last_error = Some(err);
+                    self.delay_master_read_receipt_retry(
+                        attempt,
+                        &last_error,
+                        cluster_id,
+                        identity,
+                        &master_peer,
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            if let Err(err) = self
+                .pull_master_ledger_operations(&mut client, ledger, identity, cluster_id)
+                .await
+            {
+                last_error = Some(err);
+                self.delay_master_read_receipt_retry(
+                    attempt,
+                    &last_error,
+                    cluster_id,
+                    identity,
+                    &master_peer,
+                )
+                .await;
+                continue;
+            }
+            if let Some(envelopes) = pending_envelopes.as_ref() {
+                if self.signed_envelopes_are_local(ledger, envelopes)? {
+                    return Ok(());
+                }
+            }
+
+            let envelopes = match pending_envelopes.take() {
+                Some(envelopes) => envelopes,
+                None => self.sign_read_receipt_envelopes(ledger, identity, cluster_id, &draft)?,
+            };
+            let response = client
+                .peer_push_operations(
+                    signed_peer_transport_request(
+                        PeerPushOperationsRequest {
+                            operations: envelopes.iter().map(to_proto_ledger_envelope).collect(),
+                        },
+                        identity,
+                        cluster_id,
+                        PEER_METHOD_PUSH_OPERATIONS,
+                    )
+                    .map_err(status_from_hem)?,
+                )
+                .await;
+            match response {
+                Ok(_) => match self
+                    .append_master_accepted_read_receipts(
+                        ledger,
+                        identity,
+                        cluster_id,
+                        &master_peer,
+                        &envelopes,
+                    )
+                    .await
+                {
+                    Ok(()) => return Ok(()),
+                    Err(err) => {
+                        pending_envelopes = Some(envelopes);
+                        last_error = Some(err);
+                    }
+                },
+                Err(err) => {
+                    if read_receipt_push_error_requires_resign(&err) {
+                        pending_envelopes = None;
+                    } else {
+                        pending_envelopes = Some(envelopes);
+                    }
+                    last_error = Some(err);
+                }
+            }
+            self.delay_master_read_receipt_retry(
+                attempt,
+                &last_error,
+                cluster_id,
+                identity,
+                &master_peer,
+            )
+            .await;
+        }
+        Err(last_error.unwrap_or_else(|| {
+            Status::aborted("master read receipt append failed without a transport status")
+        }))
+    }
+
+    async fn delay_master_read_receipt_retry(
+        &self,
+        attempt: usize,
+        last_error: &Option<Status>,
+        cluster_id: &str,
+        identity: &NodeIdentity,
+        master_peer: &PeerConfig,
+    ) {
+        if attempt + 1 >= READ_RECEIPT_MASTER_RETRY_ATTEMPTS {
+            return;
+        }
+        let backoff = Duration::from_millis(
+            READ_RECEIPT_MASTER_RETRY_BACKOFF_MS.saturating_mul((attempt as u64) + 1),
+        );
+        if let Some(err) = last_error {
+            warn!(
+                cluster_id = %cluster_id,
+                node_id = %identity.node_id,
+                master_node_id = %master_peer.node_id,
+                master_endpoint = %master_peer.endpoint,
+                attempt = attempt + 1,
+                max_attempts = READ_RECEIPT_MASTER_RETRY_ATTEMPTS,
+                backoff_ms = duration_millis_u64(backoff),
+                error = %err,
+                "hem master read receipt append attempt failed"
+            );
+        }
+        tokio::time::sleep(backoff).await;
+    }
+
+    fn signed_envelopes_are_local(
+        &self,
+        ledger: &hem_core::LedgerStore,
+        envelopes: &[CoreLedgerOperationEnvelope],
+    ) -> Result<bool, Status> {
+        for envelope in envelopes {
+            if let Some(existing) = ledger
+                .get_by_operation_id(envelope.body.operation_id.as_str())
+                .map_err(status_from_hem)?
+            {
+                if existing.body_hash_b64 == envelope.body_hash_b64 {
+                    continue;
+                }
+                return Err(Status::already_exists(format!(
+                    "ledger operation {} already exists with a different hash",
+                    envelope.body.operation_id
+                )));
+            }
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    async fn append_master_accepted_read_receipts(
+        &self,
+        ledger: &hem_core::LedgerStore,
+        identity: &NodeIdentity,
+        cluster_id: &str,
+        master_peer: &PeerConfig,
+        envelopes: &[CoreLedgerOperationEnvelope],
+    ) -> Result<(), Status> {
+        for envelope in envelopes {
+            if let Err(err) = self.append_or_confirm_signed(ledger, envelope) {
+                let mut refresh_client = self.connect_cluster_peer(master_peer).await?;
+                self.pull_master_ledger_operations(
+                    &mut refresh_client,
+                    ledger,
+                    identity,
+                    cluster_id,
+                )
+                .await?;
+                self.append_or_confirm_signed(ledger, envelope)
+                    .map_err(|_| err)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn sign_read_receipt_envelopes(
+        &self,
+        ledger: &hem_core::LedgerStore,
+        identity: &NodeIdentity,
+        cluster_id: &str,
+        draft: &ReadReceiptDraft<'_>,
+    ) -> Result<Vec<CoreLedgerOperationEnvelope>, Status> {
+        let node_seq = ledger
+            .node_high_watermark(identity.node_id.as_str())
+            .map_err(status_from_hem)?
+            + 1;
+        let requested_payload = serde_json::json!({
+            "receipt_id": draft.receipt_id,
+            "requester": draft.caller.actor.as_str(),
+            "token_id": draft.caller.token_id.as_str(),
+            "secret_scope": scope_label(&draft.secret.info.scope),
+            "secret_name": draft.secret.info.name.as_str(),
+            "keys": draft.keys,
+            "version": draft.secret.info.updated_at.to_rfc3339(),
+            "policy_decision": draft.policy_decision,
+            "approval_reference": draft.approval_reference,
+            "plaintext_included": false,
+        });
+        let requested = ledger
+            .sign_next(
+                identity,
+                self.cluster_ledger_operation_input(
+                    identity,
+                    cluster_id,
+                    node_seq,
+                    "read.requested",
+                    requested_payload,
+                ),
+            )
+            .map_err(status_from_hem)?;
+        let fulfilled_payload = serde_json::json!({
+            "receipt_id": draft.receipt_id,
+            "read_request_operation_id": requested.body.operation_id,
+            "requester": draft.caller.actor.as_str(),
+            "token_id": draft.caller.token_id.as_str(),
+            "secret_scope": scope_label(&draft.secret.info.scope),
+            "secret_name": draft.secret.info.name.as_str(),
+            "keys": draft.keys,
+            "version": draft.secret.info.updated_at.to_rfc3339(),
+            "policy_decision": draft.policy_decision,
+            "approval_reference": draft.approval_reference,
+            "released_key_count": draft.secret.values.len(),
+            "plaintext_included": false,
+        });
+        let fulfilled = hem_core::LedgerStore::sign_after(
+            identity,
+            self.cluster_ledger_operation_input(
+                identity,
+                cluster_id,
+                node_seq + 1,
+                "read.fulfilled",
+                fulfilled_payload,
+            ),
+            requested.body_hash_b64.clone(),
+        )
+        .map_err(status_from_hem)?;
+        Ok(vec![requested, fulfilled])
+    }
+
+    async fn pull_master_ledger_operations(
+        &self,
+        client: &mut HemRuntimeClient<tonic::transport::Channel>,
+        ledger: &hem_core::LedgerStore,
+        identity: &NodeIdentity,
+        cluster_id: &str,
+    ) -> Result<(), Status> {
+        loop {
+            let after_position = ledger.latest_position().map_err(status_from_hem)?;
+            let response = client
+                .peer_list_operations(
+                    signed_peer_transport_request(
+                        PeerListOperationsRequest {
+                            after_position,
+                            limit: DEFAULT_CLUSTER_SYNC_BATCH_LIMIT,
+                            peer_node_id: identity.node_id.clone(),
+                            use_recorded_cursor: false,
+                        },
+                        identity,
+                        cluster_id,
+                        PEER_METHOD_LIST_OPERATIONS,
+                    )
+                    .map_err(status_from_hem)?,
+                )
+                .await?
+                .into_inner();
+            if response.operations.is_empty() {
+                return Ok(());
+            }
+            let operation_count = response.operations.len();
+            let envelopes = response
+                .operations
+                .into_iter()
+                .map(from_proto_ledger_operation)
+                .collect::<Result<Vec<_>, _>>()?;
+            ledger
+                .bootstrap_from_peer_operations(cluster_id, &envelopes)
+                .map_err(status_from_hem)?;
+            if operation_count < DEFAULT_CLUSTER_SYNC_BATCH_LIMIT as usize {
+                return Ok(());
+            }
+        }
     }
 
     fn cluster_ledger_context(&self) -> Result<Option<(String, NodeIdentity)>, Status> {
@@ -901,33 +1275,35 @@ impl HemRuntimeService {
         let mut accepted = Vec::new();
         let mut failures = Vec::new();
 
-        for peer in &config.peers {
-            match self
-                .request_peer_read_approval(
-                    &cluster_id,
-                    &identity,
-                    peer,
-                    nonce.as_str(),
-                    secret_scope.as_str(),
-                    secret_name,
-                    caller,
-                    policy_decision,
-                    requester_latest_position,
-                    requester_latest_body_hash_b64.as_str(),
-                )
-                .await
-            {
-                Ok(evidence) => {
-                    accepted.push(evidence);
-                    if accepted.len() >= required_peer_acks {
-                        break;
+        if required_peer_acks > 0 {
+            for peer in &config.peers {
+                match self
+                    .request_peer_read_approval(
+                        &cluster_id,
+                        &identity,
+                        peer,
+                        nonce.as_str(),
+                        secret_scope.as_str(),
+                        secret_name,
+                        caller,
+                        policy_decision,
+                        requester_latest_position,
+                        requester_latest_body_hash_b64.as_str(),
+                    )
+                    .await
+                {
+                    Ok(evidence) => {
+                        accepted.push(evidence);
+                        if accepted.len() >= required_peer_acks {
+                            break;
+                        }
                     }
+                    Err(err) => failures.push(serde_json::json!({
+                        "peer_node_id": peer.node_id.as_str(),
+                        "endpoint": peer.endpoint.as_str(),
+                        "error": err,
+                    })),
                 }
-                Err(err) => failures.push(serde_json::json!({
-                    "peer_node_id": peer.node_id.as_str(),
-                    "endpoint": peer.endpoint.as_str(),
-                    "error": err,
-                })),
             }
         }
 
@@ -1168,7 +1544,12 @@ impl HemRuntimeService {
             .timeout(Duration::from_secs(CLUSTER_SYNC_RPC_TIMEOUT_SECS))
             .connect()
             .await
-            .map_err(|err| Status::unavailable(format!("peer connect failed: {err}")))?;
+            .map_err(|err| {
+                Status::unavailable(format!(
+                    "peer connect failed endpoint={} error={err} debug={err:?}",
+                    peer.endpoint
+                ))
+            })?;
         Ok(HemRuntimeClient::new(channel))
     }
 
@@ -1449,6 +1830,16 @@ struct ScanMatchRecord {
 struct ReadPolicyOutcome {
     decision: String,
     reference: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReadReceiptDraft<'a> {
+    caller: &'a CallerPrincipal,
+    secret: &'a CoreSecretWithValues,
+    policy_decision: &'a str,
+    approval_reference: &'a str,
+    receipt_id: &'a str,
+    keys: &'a [String],
 }
 
 #[derive(Debug, Clone)]
@@ -2080,7 +2471,8 @@ impl HemRuntime for HemRuntimeService {
             &secret,
             policy.decision.as_str(),
             policy.reference.as_str(),
-        )?;
+        )
+        .await?;
 
         self.audit(
             &store,
@@ -2240,10 +2632,12 @@ impl HemRuntime for HemRuntimeService {
         let req = request.into_inner();
         let scope = parse_optional_scope_selector(req.scope)?;
 
-        let mut secrets = match scope.as_ref() {
+        let local_secrets = match scope.as_ref() {
             Some(scope) => store.list_secrets(Some(scope)).map_err(status_from_hem)?,
             None => store.list_secrets(None).map_err(status_from_hem)?,
         };
+        let distributed_secrets = self.list_distributed_secret_infos(&store, scope.as_ref())?;
+        let mut secrets = merge_secret_infos(local_secrets, distributed_secrets);
 
         if !caller.is_operator {
             secrets.retain(|item| {
@@ -2363,7 +2757,8 @@ impl HemRuntime for HemRuntimeService {
                                                 &secret,
                                                 policy.decision.as_str(),
                                                 policy.reference.as_str(),
-                                            )?;
+                                            )
+                                            .await?;
                                             secret_batch_result::Result::Secret(
                                                 to_proto_secret_with_values(secret),
                                             )
@@ -2423,7 +2818,8 @@ impl HemRuntime for HemRuntimeService {
                                 &secret,
                                 policy.decision.as_str(),
                                 policy.reference.as_str(),
-                            )?;
+                            )
+                            .await?;
                             secret_batch_result::Result::Secret(to_proto_secret_with_values(secret))
                         }
                     } else {
@@ -2436,7 +2832,8 @@ impl HemRuntime for HemRuntimeService {
                             &secret,
                             policy.decision.as_str(),
                             policy.reference.as_str(),
-                        )?;
+                        )
+                        .await?;
                         secret_batch_result::Result::Secret(to_proto_secret_with_values(secret))
                     }
                 }
@@ -4474,6 +4871,27 @@ fn to_proto_ledger_operation(
     }
 }
 
+fn to_proto_ledger_envelope(
+    envelope: &CoreLedgerOperationEnvelope,
+) -> proto::LedgerOperationEnvelope {
+    proto::LedgerOperationEnvelope {
+        body: Some(proto::LedgerOperationBody {
+            operation_id: envelope.body.operation_id.clone(),
+            cluster_id: envelope.body.cluster_id.clone(),
+            node_id: envelope.body.node_id.clone(),
+            node_seq: envelope.body.node_seq,
+            op_type: envelope.body.op_type.clone(),
+            payload_json: envelope.body.payload_json.to_string(),
+            created_at: envelope.body.created_at.to_rfc3339(),
+            prev_hash_b64: envelope.body.prev_hash_b64.clone(),
+        }),
+        body_hash_b64: envelope.body_hash_b64.clone(),
+        signing_public_key_b64: envelope.signing_public_key_b64.clone(),
+        signature_b64: envelope.signature_b64.clone(),
+        position: 0,
+    }
+}
+
 fn from_proto_ledger_operation(
     operation: proto::LedgerOperationEnvelope,
 ) -> Result<CoreLedgerOperationEnvelope, Status> {
@@ -4604,6 +5022,63 @@ fn to_resolution_context(context: Option<proto::ScopeResolutionContext>) -> Scop
             project: normalize_optional_string(context.project),
         },
         None => ScopeResolutionContext::default(),
+    }
+}
+
+fn merge_secret_infos(
+    local: Vec<CoreSecretInfo>,
+    distributed: Vec<CoreSecretInfo>,
+) -> Vec<CoreSecretInfo> {
+    let mut by_ref = HashMap::new();
+    for item in local {
+        by_ref.insert(secret_info_key(&item), item);
+    }
+    for item in distributed {
+        by_ref.insert(secret_info_key(&item), item);
+    }
+
+    let mut out = by_ref.into_values().collect::<Vec<_>>();
+    out.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| scope_label(&left.scope).cmp(&scope_label(&right.scope)))
+    });
+    out
+}
+
+fn secret_info_key(info: &CoreSecretInfo) -> (String, String) {
+    (scope_label(&info.scope), info.name.clone())
+}
+
+fn secret_info_from_ledger_metadata(
+    metadata: CoreLedgerSecretMetadata,
+) -> Result<CoreSecretInfo, Status> {
+    Ok(CoreSecretInfo {
+        scope: secret_scope_from_label(metadata.scope.as_str())?,
+        name: metadata.name,
+        description: metadata.description,
+        requires_approval: metadata.requires_approval,
+        group: metadata.group,
+        created_at: metadata.updated_at,
+        updated_at: metadata.updated_at,
+        created_by: metadata.updated_by,
+        last_accessed_at: None,
+        last_accessed_by: None,
+    })
+}
+
+fn secret_scope_from_label(value: &str) -> Result<SecretScope, Status> {
+    match value.split('/').collect::<Vec<_>>().as_slice() {
+        ["global"] => Ok(SecretScope::Global),
+        ["project", project] => Ok(SecretScope::Project {
+            project: parse_subject("project", project)?,
+        }),
+        ["identity", identity_id] => Ok(SecretScope::Identity {
+            identity_id: parse_subject("identity_id", identity_id)?,
+        }),
+        _ => Err(Status::failed_precondition(format!(
+            "ledger secret metadata has invalid scope: {value}"
+        ))),
     }
 }
 
@@ -4918,6 +5393,13 @@ fn status_from_hem(err: HemError) -> Status {
         | HemError::MasterKeyParse(_)
         | HemError::Crypto(_) => Status::internal(err.to_string()),
     }
+}
+
+fn read_receipt_push_error_requires_resign(err: &Status) -> bool {
+    matches!(
+        err.code(),
+        Code::AlreadyExists | Code::FailedPrecondition | Code::InvalidArgument
+    )
 }
 
 fn checkpoint_cosign_status_from_hem(err: HemError) -> Status {
@@ -5558,5 +6040,82 @@ mod tests {
         assert!(second >= first);
         assert!(capped <= Duration::from_millis(1000));
         assert_eq!(first, settings.backoff_for_failure("hmn_peer", 1));
+    }
+
+    #[test]
+    fn merge_secret_infos_adds_distributed_and_overrides_local() {
+        let merged = merge_secret_infos(
+            vec![
+                test_secret_info(SecretScope::Global, "shared", "local"),
+                test_secret_info(
+                    SecretScope::Project {
+                        project: "demo".to_string(),
+                    },
+                    "local-only",
+                    "local project",
+                ),
+            ],
+            vec![
+                test_secret_info(SecretScope::Global, "shared", "distributed"),
+                test_secret_info(
+                    SecretScope::Identity {
+                        identity_id: "agent-a".to_string(),
+                    },
+                    "distributed-only",
+                    "distributed identity",
+                ),
+            ],
+        );
+
+        assert_eq!(merged.len(), 3);
+        let shared = merged
+            .iter()
+            .find(|item| item.name == "shared")
+            .expect("shared secret");
+        assert_eq!(shared.description, "distributed");
+        assert!(merged.iter().any(|item| item.name == "local-only"));
+        assert!(merged.iter().any(|item| item.name == "distributed-only"));
+    }
+
+    #[test]
+    fn secret_scope_from_label_roundtrips_supported_scopes() {
+        assert_eq!(
+            secret_scope_from_label("global").expect("global"),
+            SecretScope::Global
+        );
+        assert_eq!(
+            secret_scope_from_label("project/demo").expect("project"),
+            SecretScope::Project {
+                project: "demo".to_string()
+            }
+        );
+        assert_eq!(
+            secret_scope_from_label("identity/agent-a").expect("identity"),
+            SecretScope::Identity {
+                identity_id: "agent-a".to_string()
+            }
+        );
+        assert_eq!(
+            secret_scope_from_label("team/demo")
+                .expect_err("unsupported scope")
+                .code(),
+            Code::FailedPrecondition
+        );
+    }
+
+    fn test_secret_info(scope: SecretScope, name: &str, description: &str) -> CoreSecretInfo {
+        let now = Utc::now();
+        CoreSecretInfo {
+            scope,
+            name: name.to_string(),
+            description: description.to_string(),
+            requires_approval: false,
+            group: None,
+            created_at: now,
+            updated_at: now,
+            created_by: "tester".to_string(),
+            last_accessed_at: None,
+            last_accessed_by: None,
+        }
     }
 }

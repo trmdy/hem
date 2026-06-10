@@ -291,6 +291,20 @@ impl LedgerStore {
             )));
         }
         let prev_hash_b64 = self.latest_body_hash()?.unwrap_or_default();
+        Self::sign_after(identity, input, prev_hash_b64)
+    }
+
+    pub fn sign_after(
+        identity: &NodeIdentity,
+        input: LedgerOperationInput,
+        prev_hash_b64: String,
+    ) -> Result<LedgerOperationEnvelope> {
+        if input.node_id != identity.node_id {
+            return Err(HemError::InvalidArgument(format!(
+                "ledger node_id {} does not match identity node_id {}",
+                input.node_id, identity.node_id
+            )));
+        }
         let body = LedgerOperationBody::from_input(input, prev_hash_b64)?;
         LedgerOperationEnvelope::sign(body, identity)
     }
@@ -838,6 +852,42 @@ impl LedgerStore {
         )
         .optional()
         .map_err(HemError::from)
+    }
+
+    pub fn list_materialized_secret_metadata(
+        &self,
+        cluster_id: &str,
+        scope: Option<&str>,
+    ) -> Result<Vec<LedgerSecretMetadata>> {
+        validate_non_empty("cluster_id", cluster_id)?;
+        let conn = self.connect()?;
+        match scope {
+            Some(scope) => {
+                validate_non_empty("scope", scope)?;
+                let mut stmt = conn.prepare(
+                    "SELECT cluster_id, scope, name, description, requires_approval, group_name,
+                            updated_at, updated_by, last_operation_id, last_position
+                     FROM ledger_secret_metadata
+                     WHERE cluster_id = ?1 AND scope = ?2
+                     ORDER BY scope ASC, name ASC",
+                )?;
+                let rows = stmt.query_map(params![cluster_id, scope], secret_metadata_from_row)?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(HemError::from)
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT cluster_id, scope, name, description, requires_approval, group_name,
+                            updated_at, updated_by, last_operation_id, last_position
+                     FROM ledger_secret_metadata
+                     WHERE cluster_id = ?1
+                     ORDER BY scope ASC, name ASC",
+                )?;
+                let rows = stmt.query_map(params![cluster_id], secret_metadata_from_row)?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(HemError::from)
+            }
+        }
     }
 
     pub fn materialize_secret_value_versions(&self) -> Result<usize> {
@@ -3360,5 +3410,91 @@ fn blank_dash(value: &str) -> &str {
         "-"
     } else {
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_materialized_secret_metadata_filters_by_cluster_and_scope() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let ledger = LedgerStore::open(root.path()).expect("open ledger");
+        let identity = NodeIdentity::generate("hmn_a", "node a").expect("identity");
+
+        append_metadata_operation(
+            &ledger,
+            &identity,
+            "hop_global",
+            "hmc_a",
+            1,
+            "global",
+            "alpha",
+        );
+        append_metadata_operation(
+            &ledger,
+            &identity,
+            "hop_project",
+            "hmc_a",
+            2,
+            "project/demo",
+            "bravo",
+        );
+        append_metadata_operation(
+            &ledger,
+            &identity,
+            "hop_other_cluster",
+            "hmc_b",
+            3,
+            "global",
+            "charlie",
+        );
+
+        assert_eq!(
+            ledger.materialize_secret_metadata().expect("materialize"),
+            3
+        );
+
+        let all = ledger
+            .list_materialized_secret_metadata("hmc_a", None)
+            .expect("list all");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].name, "alpha");
+        assert_eq!(all[1].name, "bravo");
+
+        let global = ledger
+            .list_materialized_secret_metadata("hmc_a", Some("global"))
+            .expect("list global");
+        assert_eq!(global.len(), 1);
+        assert_eq!(global[0].name, "alpha");
+    }
+
+    fn append_metadata_operation(
+        ledger: &LedgerStore,
+        identity: &NodeIdentity,
+        operation_id: &str,
+        cluster_id: &str,
+        node_seq: i64,
+        scope: &str,
+        name: &str,
+    ) {
+        let input = LedgerOperationInput {
+            operation_id: operation_id.to_string(),
+            cluster_id: cluster_id.to_string(),
+            node_id: identity.node_id.clone(),
+            node_seq,
+            op_type: "secret.metadata.set".to_string(),
+            payload_json: json!({
+                "scope": scope,
+                "name": name,
+                "description": format!("metadata for {name}"),
+                "requires_approval": false,
+                "actor": "tester",
+            }),
+            created_at: Utc::now(),
+        };
+        let envelope = ledger.sign_next(identity, input).expect("sign");
+        ledger.append_signed(&envelope).expect("append");
     }
 }

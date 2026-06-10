@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>io.valhall.hemd</string>
+  <key>CFBundleName</key>
+  <string>hemd</string>
+  <key>CFBundleExecutable</key>
+  <string>hemd</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Hem connects to trusted Valhall cluster peers on the local network to replicate encrypted secret ledger operations and read receipts.</string>
+</dict>
+</plist>

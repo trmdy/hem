@@ -1,4 +1,8 @@
-use std::{collections::HashMap, env, fs, path::PathBuf};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use thiserror::Error;
 use tonic::{
@@ -19,6 +23,9 @@ use proto::{
 };
 
 pub const DEFAULT_HEMD_ENDPOINT: &str = "http://127.0.0.1:50091";
+const OPERATOR_TOKEN_FILE: &str = "operator.token";
+const DEFAULT_HEM_SUBDIR: &str = ".valhall/hem";
+const DEFAULT_HEM_SYSTEM_DAEMONS_SUBDIR: &str = ".valhall/system-daemons/data/hem";
 
 #[derive(Debug, Clone, Default)]
 pub struct HemScopeContext {
@@ -301,36 +308,61 @@ pub fn resolve_token_from_env_or_default_files() -> Option<String> {
         }
     }
 
-    if let Ok(value) = env::var("HEM_DATA_DIR") {
-        let path = PathBuf::from(value).join("operator.token");
+    for path in operator_token_file_candidates() {
         if let Some(token) = read_token_file(path.as_path()) {
             return Some(token);
-        }
-    }
-
-    if let Ok(home) = env::var("HOME") {
-        for path in [
-            PathBuf::from(home.as_str())
-                .join(".valhall")
-                .join("hem")
-                .join("operator.token"),
-            PathBuf::from(home.as_str())
-                .join(".valhall")
-                .join("system-daemons")
-                .join("data")
-                .join("hem")
-                .join("operator.token"),
-        ] {
-            if let Some(token) = read_token_file(path.as_path()) {
-                return Some(token);
-            }
         }
     }
 
     None
 }
 
-fn read_token_file(path: &std::path::Path) -> Option<String> {
+fn operator_token_file_candidates() -> Vec<PathBuf> {
+    let hem_data_dir = env::var("HEM_DATA_DIR").ok();
+    let system_daemons_dir = env::var("VALHALL_SYSTEM_DAEMONS_DIR").ok();
+    let home = env::var("HOME").ok();
+    operator_token_file_candidates_from_values(
+        hem_data_dir.as_deref(),
+        system_daemons_dir.as_deref(),
+        home.as_deref(),
+    )
+}
+
+fn operator_token_file_candidates_from_values(
+    hem_data_dir: Option<&str>,
+    system_daemons_dir: Option<&str>,
+    home: Option<&str>,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+
+    if let Some(value) = hem_data_dir.and_then(normalize_optional) {
+        out.push(PathBuf::from(value).join(OPERATOR_TOKEN_FILE));
+    }
+    if let Some(value) = system_daemons_dir.and_then(normalize_optional) {
+        out.push(
+            PathBuf::from(value)
+                .join("data")
+                .join("hem")
+                .join(OPERATOR_TOKEN_FILE),
+        );
+    }
+    if let Some(home) = home.and_then(normalize_optional) {
+        out.push(
+            PathBuf::from(home)
+                .join(DEFAULT_HEM_SUBDIR)
+                .join(OPERATOR_TOKEN_FILE),
+        );
+        out.push(
+            PathBuf::from(home)
+                .join(DEFAULT_HEM_SYSTEM_DAEMONS_SUBDIR)
+                .join(OPERATOR_TOKEN_FILE),
+        );
+    }
+
+    out
+}
+
+fn read_token_file(path: &Path) -> Option<String> {
     let body = fs::read_to_string(path).ok()?;
     normalize_optional(body.as_str()).map(ToString::to_string)
 }
@@ -408,5 +440,37 @@ fn secret_metadata_from_proto(info: SecretInfo) -> SecretMetadata {
         description: info.description,
         requires_approval: info.requires_approval,
         group: info.group,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{operator_token_file_candidates_from_values, OPERATOR_TOKEN_FILE};
+    use std::path::PathBuf;
+
+    #[test]
+    fn token_file_candidates_match_cli_fallback_order() {
+        let candidates = operator_token_file_candidates_from_values(
+            Some("/custom/hem"),
+            Some("/custom/system-daemons"),
+            Some("/home/alice"),
+        );
+
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/custom/hem").join(OPERATOR_TOKEN_FILE),
+                PathBuf::from("/custom/system-daemons")
+                    .join("data")
+                    .join("hem")
+                    .join(OPERATOR_TOKEN_FILE),
+                PathBuf::from("/home/alice")
+                    .join(".valhall/hem")
+                    .join(OPERATOR_TOKEN_FILE),
+                PathBuf::from("/home/alice")
+                    .join(".valhall/system-daemons/data/hem")
+                    .join(OPERATOR_TOKEN_FILE),
+            ]
+        );
     }
 }

@@ -46,6 +46,20 @@ Alert on:
 - `quorum_risk=true`
 - `checkpoint_status=pending_quorum` for longer than the sync interval plus backoff
 
+`scripts/hem-cluster-watchdog.sh` wraps these checks for the deployed
+multi-node cluster. It can run once for CI/operator validation or loop on an
+interval. When configured with `--receipt-ref`, it also performs a safe read
+that hashes output instead of printing plaintext and then verifies a
+`read.fulfilled` ledger operation was written.
+
+```sh
+scripts/hem-cluster-watchdog.sh --once
+scripts/hem-cluster-watchdog.sh --interval 60 --receipt-ref global/hem-distribution-smoke-watchdog --receipt-key value
+```
+
+Set `HEM_CLUSTER_ALERT_CMD` to a shell command for notifications. The command
+receives the alert text in `HEM_ALERT_MESSAGE`.
+
 ## Daemon Logs
 
 `hemd` emits structured tracing events for:

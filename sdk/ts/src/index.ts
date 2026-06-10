@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -11,6 +11,7 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 const DEFAULT_WAIT_POLL_INTERVAL_MS = 250;
 const DEFAULT_WAIT_TIMEOUT_MS = 5 * 60 * 1_000;
 const DEFAULT_PROTO_PATH = resolveDefaultProtoPath();
+const OPERATOR_TOKEN_FILE = "operator.token";
 
 const SECRET_SCOPE_GLOBAL = 1;
 const SECRET_SCOPE_PROJECT = 2;
@@ -482,7 +483,49 @@ function resolveEndpointFromEnv(): string {
 }
 
 function resolveTokenFromEnv(): string | undefined {
-  return normalizeOptional(process.env.VALHALL_HEM_TOKEN);
+  const envToken = normalizeOptional(process.env.VALHALL_HEM_TOKEN);
+  if (envToken) {
+    return envToken;
+  }
+
+  for (const path of operatorTokenFileCandidates()) {
+    const token = readTokenFile(path);
+    if (token) {
+      return token;
+    }
+  }
+
+  return undefined;
+}
+
+function operatorTokenFileCandidates(): string[] {
+  const candidates: string[] = [];
+  const hemDataDir = normalizeOptional(process.env.HEM_DATA_DIR);
+  const systemDaemonsDir = normalizeOptional(process.env.VALHALL_SYSTEM_DAEMONS_DIR);
+  const home = normalizeOptional(process.env.HOME);
+
+  if (hemDataDir) {
+    candidates.push(resolve(hemDataDir, OPERATOR_TOKEN_FILE));
+  }
+  if (systemDaemonsDir) {
+    candidates.push(resolve(systemDaemonsDir, "data", "hem", OPERATOR_TOKEN_FILE));
+  }
+  if (home) {
+    candidates.push(resolve(home, ".valhall", "hem", OPERATOR_TOKEN_FILE));
+    candidates.push(
+      resolve(home, ".valhall", "system-daemons", "data", "hem", OPERATOR_TOKEN_FILE),
+    );
+  }
+
+  return candidates;
+}
+
+function readTokenFile(path: string): string | undefined {
+  try {
+    return normalizeOptional(readFileSync(path, "utf8"));
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizeEndpoint(endpoint: string): string {

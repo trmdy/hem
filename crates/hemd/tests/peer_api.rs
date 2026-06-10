@@ -8,8 +8,9 @@ use std::{
 use chrono::Utc;
 use hem_core::{
     envelope_decrypt_for_node, peer_transport_auth_statement_bytes, ClusterConfig,
-    EnvelopeEncryptedValue, HemStore, IssueOfflineLeaseInput, LedgerOperationInput, NodeIdentity,
-    PeerConfig, SecretPolicyTier, SecretScope as CoreSecretScope,
+    EnvelopeEncryptedValue, HemStore, IssueOfflineLeaseInput, LedgerOperation, LedgerOperationBody,
+    LedgerOperationEnvelope, LedgerOperationInput, NodeIdentity, PeerConfig, SecretPolicyTier,
+    SecretScope as CoreSecretScope,
 };
 use serde_json::json;
 use tokio::time::sleep;
@@ -1128,6 +1129,119 @@ async fn clustered_daemon_mutations_append_signed_ledger_operations(
 }
 
 #[tokio::test]
+async fn non_master_read_receipts_are_sequenced_by_master() -> Result<(), Box<dyn std::error::Error>>
+{
+    let cluster_id = "hmc_read_receipt_master";
+    let master_dir = tempfile::tempdir()?;
+    let worker_dir = tempfile::tempdir()?;
+    HemStore::init(master_dir.path(), false)?;
+    HemStore::init(worker_dir.path(), false)?;
+    let master_identity = NodeIdentity::generate("hmn_master", "master")?;
+    let worker_identity = NodeIdentity::generate("hmn_worker", "worker")?;
+
+    ClusterConfig {
+        enabled: true,
+        cluster_id: cluster_id.to_string(),
+        node_id: master_identity.node_id.clone(),
+        listen: "127.0.0.1:0".to_string(),
+        quorum: 1,
+        master_node_id: Some(master_identity.node_id.clone()),
+        peers: vec![PeerConfig {
+            node_id: worker_identity.node_id.clone(),
+            endpoint: "http://127.0.0.1:59999".to_string(),
+            public_key: worker_identity.signing_public_key_b64.clone(),
+            wrap_public_key: worker_identity.wrap_public_key_b64.clone(),
+        }],
+    }
+    .save(&master_dir.path().join("cluster.toml"))?;
+    master_identity.save(&master_dir.path().join("node-identity.json"))?;
+    let master_daemon =
+        TestDaemon::start_with_env(master_dir.path(), &[("VALHALL_HEM_CLUSTER_SYNC", "0")]).await?;
+
+    ClusterConfig {
+        enabled: true,
+        cluster_id: cluster_id.to_string(),
+        node_id: worker_identity.node_id.clone(),
+        listen: "127.0.0.1:0".to_string(),
+        quorum: 1,
+        master_node_id: Some(master_identity.node_id.clone()),
+        peers: vec![PeerConfig {
+            node_id: master_identity.node_id.clone(),
+            endpoint: master_daemon.endpoint.clone(),
+            public_key: master_identity.signing_public_key_b64.clone(),
+            wrap_public_key: master_identity.wrap_public_key_b64.clone(),
+        }],
+    }
+    .save(&worker_dir.path().join("cluster.toml"))?;
+    worker_identity.save(&worker_dir.path().join("node-identity.json"))?;
+    let worker_daemon =
+        TestDaemon::start_with_env(worker_dir.path(), &[("VALHALL_HEM_CLUSTER_SYNC", "0")]).await?;
+
+    let mut master_client = connect_client(master_daemon.endpoint.as_str()).await?;
+    let master_token = HemStore::open(master_dir.path())?
+        .token_manager()?
+        .issue_operator_token(Duration::from_secs(600), "itest")?
+        .token;
+    master_client
+        .set_secret(authorized(
+            master_token.as_str(),
+            SetSecretRequest {
+                secret: Some(proto_secret_ref("sequenced-read")),
+                values: vec![SecretValue {
+                    key: "api_key".to_string(),
+                    value: "sequenced-value".to_string(),
+                }],
+                description: "master sequenced read".to_string(),
+                requires_approval: false,
+                group: String::new(),
+                actor: "itest".to_string(),
+                approval_receipt: String::new(),
+                reason: String::new(),
+            },
+        ))
+        .await?;
+
+    let master_ledger = HemStore::open(master_dir.path())?.ledger_store()?;
+    let worker_ledger = HemStore::open(worker_dir.path())?.ledger_store()?;
+    let bootstrap = master_ledger
+        .list_after(0, 100)?
+        .iter()
+        .map(envelope_from_operation)
+        .collect::<Vec<_>>();
+    worker_ledger.bootstrap_from_peer_operations(cluster_id, bootstrap.as_slice())?;
+
+    let worker_token = HemStore::open(worker_dir.path())?
+        .token_manager()?
+        .issue_service_token(
+            "sequenced-reader".to_string(),
+            Duration::from_secs(600),
+            "itest",
+        )?
+        .token;
+    let mut worker_client = connect_client(worker_daemon.endpoint.as_str()).await?;
+    let value = read_api_key(&mut worker_client, worker_token.as_str(), "sequenced-read").await?;
+    assert_eq!(value, "sequenced-value");
+
+    assert_operation_count(master_dir.path(), "read.requested", 1)?;
+    assert_operation_count(master_dir.path(), "read.fulfilled", 1)?;
+    assert_operation_count(worker_dir.path(), "read.requested", 1)?;
+    assert_operation_count(worker_dir.path(), "read.fulfilled", 1)?;
+    assert_eq!(
+        master_ledger.latest_position()?,
+        worker_ledger.latest_position()?
+    );
+    assert_eq!(
+        master_ledger.latest_body_hash()?,
+        worker_ledger.latest_body_hash()?
+    );
+    let report = master_ledger.verify_integrity()?;
+    assert!(report.ok, "master ledger report: {report:?}");
+    let report = worker_ledger.verify_integrity()?;
+    assert!(report.ok, "worker ledger report: {report:?}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn master_biometric_policy_requires_configured_master_peer(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = tempfile::tempdir()?;
@@ -1277,6 +1391,24 @@ fn read_fulfilled_payload_for(
         })
         .map(|operation| operation.payload_json)
         .ok_or_else(|| format!("missing read.fulfilled payload for {name}").into())
+}
+
+fn envelope_from_operation(operation: &LedgerOperation) -> LedgerOperationEnvelope {
+    LedgerOperationEnvelope {
+        body: LedgerOperationBody {
+            operation_id: operation.operation_id.clone(),
+            cluster_id: operation.cluster_id.clone(),
+            node_id: operation.node_id.clone(),
+            node_seq: operation.node_seq,
+            op_type: operation.op_type.clone(),
+            payload_json: operation.payload_json.clone(),
+            created_at: operation.created_at,
+            prev_hash_b64: operation.prev_hash_b64.clone(),
+        },
+        body_hash_b64: operation.body_hash_b64.clone(),
+        signing_public_key_b64: operation.signing_public_key_b64.clone(),
+        signature_b64: operation.signature_b64.clone(),
+    }
 }
 
 fn ledger_envelope_for_key(

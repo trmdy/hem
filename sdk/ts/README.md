@@ -30,4 +30,4 @@ hem.close();
 Default endpoint/token resolution:
 
 - endpoint: `VALHALL_HEM_ADDR` -> `VALHALL_HEMD_ENDPOINT` -> `127.0.0.1:50091`
-- token: `VALHALL_HEM_TOKEN`
+- token: `VALHALL_HEM_TOKEN` -> `$HEM_DATA_DIR/operator.token` -> `$VALHALL_SYSTEM_DAEMONS_DIR/data/hem/operator.token` -> `~/.valhall/hem/operator.token` -> `~/.valhall/system-daemons/data/hem/operator.token`
