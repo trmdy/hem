@@ -1,0 +1,6 @@
+peers=5
+peer node_id=hmn_alder01 endpoint=http://192.0.2.250:50091 public_key=zViuBSV65X2CdTmD85ysnYuWO1UPqNlDr4AUYxa8O9I wrap_public_key=OCJOwOdTbmX17lWi/5JrvHPQdC7Zntph18MeGae2lto
+peer node_id=hmn_birch02 endpoint=http://192.0.2.185:50091 public_key=PjDEJLk0H/3CwNLWc37TjbWTNrpfIK5aUhObUpSykcw wrap_public_key=X8cpw7ZbV1Vkd1i29KxcMKtiibrzKNJDuLh+GYpzKFU
+peer node_id=hmn_cedar03 endpoint=http://192.0.2.137:50091 public_key=iw7GUkAw4MmhFNfHdWTTsaHfnW4dkEWHIgiJga35aGw wrap_public_key=54PHWTSRBVZjX6rTZzrh2i9dPVV1bkRdP32gCGwpmZE
+peer node_id=hmn_dogwood04 endpoint=http://192.0.2.85:50091 public_key=5wINfk2StWyb+PYAFdVknLFjB86VKt9Jfh8aNYQ08BY wrap_public_key=Q9IAlaf5XQz2bjZxMd0bMbJ1iNZgElmQ3OEEic0vjak
+peer node_id=hmn_elm05 endpoint=http://192.0.2.117:50091 public_key=dRypGTFSlTuQrilZ1CDyP9joeWlrhuRxnmzIzFBw5s0 wrap_public_key=HWUuxCfgvsUOhUMRFVvVNyvXpX9Puu72UOwBJ+bN8XU

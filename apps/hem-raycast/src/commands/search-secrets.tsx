@@ -27,7 +27,7 @@ type ValuesResult =
   { kind: "ok"; values: Record<string, string>; info: SecretInfo } | { kind: "pending"; requestId: string };
 
 async function fetchSecretValues(refParts: SecretRefParts): Promise<ValuesResult> {
-  const response = await getClient().getSecret({ secret: refToProto(refParts) });
+  const response = await getClient().getSecret({ secret: refToProto(refParts) }, { asyncRead: true });
   if (response.pending) return { kind: "pending", requestId: response.pending.request_id };
   if (!response.secret) throw new Error("empty GetSecret response");
   return { kind: "ok", values: response.secret.values ?? {}, info: response.secret.info };

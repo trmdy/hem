@@ -103,7 +103,7 @@
     "lint:ray": "ray lint",
     "fix-lint": "eslint src --fix && prettier --write src",
     "test": "vitest run",
-    "test:integration": "node scripts/integration-test.mjs",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "sync-proto": "node scripts/sync-proto.mjs",
     "gen-icon": "node scripts/gen-icon.mjs"
   },

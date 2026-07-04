@@ -242,9 +242,14 @@ export class HemClient {
     return this.call("SetSecret", req);
   }
 
+  /**
+   * `asyncRead: true` makes approval-gated reads return `pending` immediately
+   * instead of blocking until the approval is resolved (or the deadline
+   * expires) — UI callers should always set it.
+   */
   getSecret(
     lookup: SecretLookup,
-    opts: { key?: string; reason?: string; approvalReceipt?: string } = {},
+    opts: { key?: string; reason?: string; approvalReceipt?: string; asyncRead?: boolean } = {},
   ): Promise<GetSecretResponse> {
     return this.call("GetSecret", {
       ...(lookup.secret ? { secret: lookup.secret } : { name: lookup.name }),
@@ -252,6 +257,7 @@ export class HemClient {
       ...(opts.key ? { key: opts.key } : {}),
       ...(opts.reason ? { reason: opts.reason } : {}),
       ...(opts.approvalReceipt ? { approval_receipt: opts.approvalReceipt } : {}),
+      ...(opts.asyncRead ? { async_read: true } : {}),
     });
   }
 
