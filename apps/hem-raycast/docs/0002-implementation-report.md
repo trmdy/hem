@@ -125,6 +125,21 @@ mapping → audit entries. Teardown kills the daemon and removes the tmpdir.
 - `FAILED_PRECONDITION` cluster-policy read rendering (needs a peer_quorum
   policy secret with peers down).
 
+## Post-import fixes
+
+- **2026-07-04 · Cluster Status perceived hang.** `hem cluster health` takes
+  ~31 s on this cluster (full ledger verification + probing the dead
+  elm05 peer), and both Cluster Status and the menu bar awaited it before
+  rendering. Fixed with staged rendering: `cluster status` + `cluster peers`
+  (local config reads, ~10 ms, `getClusterSnapshot`) paint the view
+  instantly with a "probing peers… ~30 s" health row and per-node
+  "probing…" accessories; the health probe streams in when done. The menu
+  bar now renders from cache immediately, fetches daemon health + approvals
+  in a fast gRPC pass, and reruns the 31 s probe only when the cached result
+  is older than 5 minutes (staleness guard — previously it reran on every
+  popover open while the cluster was non-ok, which is this cluster's steady
+  state).
+
 ## Known issues / notes
 
 - `ray lint` (full) fails only on the unregistered `author` (see deviation 2).

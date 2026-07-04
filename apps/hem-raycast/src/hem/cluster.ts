@@ -159,3 +159,43 @@ export async function getClusterHealth(binary: string): Promise<ClusterHealth> {
   const res = await runCluster(binary, ["health"]);
   return clusterHealthFromOutput(res.stdout, res.exitCode);
 }
+
+// --- fast local snapshot ---
+
+export interface PeerConfig {
+  nodeId: string;
+  endpoint: string;
+  publicKey: string | null;
+  wrapPublicKey: string | null;
+}
+
+export interface ClusterSnapshot {
+  /** Scalars from `hem cluster status` (local config read). */
+  scalars: Record<string, string>;
+  /** Static peers from `hem cluster peers` (local config read). */
+  peers: PeerConfig[];
+}
+
+export function peerConfigFromRecord(record: KvRecord): PeerConfig {
+  const f = record.fields;
+  return {
+    nodeId: f.node_id ?? "",
+    endpoint: f.endpoint ?? "",
+    publicKey: dashToNull(f.public_key),
+    wrapPublicKey: dashToNull(f.wrap_public_key),
+  };
+}
+
+/**
+ * Fast snapshot from `cluster status` + `cluster peers`: both only read
+ * local config files (~10 ms). `cluster health` by contrast verifies the
+ * ledger and probes every peer (~30 s on a cluster with a dead node) —
+ * render from this snapshot first and let health arrive later.
+ */
+export async function getClusterSnapshot(binary: string): Promise<ClusterSnapshot> {
+  const [status, peers] = await Promise.all([runCluster(binary, ["status"]), runCluster(binary, ["peers"])]);
+  return {
+    scalars: status.parsed.scalars,
+    peers: peers.parsed.records.filter((r) => r.type === "peer").map(peerConfigFromRecord),
+  };
+}

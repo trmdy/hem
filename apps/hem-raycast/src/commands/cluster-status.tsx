@@ -12,7 +12,7 @@ import {
 } from "@raycast/api";
 import { usePromise } from "@raycast/utils";
 import { showErrorToast } from "../components/toasts";
-import { ClusterHealth, getClusterHealth, KvRecord, PeerHealth, runCluster } from "../hem/cluster";
+import { ClusterHealth, getClusterHealth, getClusterSnapshot, PeerHealth, runCluster } from "../hem/cluster";
 import { getConfig } from "../hem/config";
 
 function statusIcon(status: ClusterHealth["status"]): { source: Icon; tintColor: Color } {
@@ -93,74 +93,96 @@ function CommonActions({ health, revalidate }: { health?: ClusterHealth; revalid
 
 export default function ClusterStatus() {
   const config = getConfig();
-  const { data, error, isLoading, revalidate } = usePromise(async () => {
-    const health = await getClusterHealth(config.hemBinary);
-    let peerRecords: KvRecord[] = [];
-    try {
-      const peers = await runCluster(config.hemBinary, ["peers"]);
-      peerRecords = peers.parsed.records.filter((r) => r.type === "peer");
-    } catch {
-      // wrap-key info is optional decoration
-    }
-    return { health, peerRecords };
-  }, []);
+  // Instant paint: `cluster status` + `cluster peers` read local config (~10 ms).
+  const snapshot = usePromise(async () => getClusterSnapshot(config.hemBinary), []);
+  // Slow enrichment: `cluster health` verifies the ledger and probes every
+  // peer (~30 s with a dead node) — never block first render on it.
+  const healthPromise = usePromise(async () => getClusterHealth(config.hemBinary), []);
 
-  if (error) {
+  const revalidate = () => {
+    snapshot.revalidate();
+    healthPromise.revalidate();
+  };
+
+  if (snapshot.error && !healthPromise.data) {
     // CLI failed to run at all (missing binary etc.) — spec §6: show raw, never crash.
     return (
       <Detail
-        markdown={`# hem cluster health failed\n\n\`\`\`\n${String((error as Error).message ?? error)}\n\`\`\`\n\nBinary: \`${config.hemBinary}\` (configurable in preferences)`}
+        markdown={`# hem cluster status failed\n\n\`\`\`\n${String((snapshot.error as Error).message ?? snapshot.error)}\n\`\`\`\n\nBinary: \`${config.hemBinary}\` (configurable in preferences)`}
       />
     );
   }
 
-  const health = data?.health;
-  const parseFailed = health && Object.keys(health.scalars).length === 0;
-  if (health && parseFailed) {
-    return (
-      <Detail
-        markdown={`# Unparseable cluster health output (exit ${health.exitCode})\n\n\`\`\`\n${health.raw || "(empty output)"}\n\`\`\``}
-        actions={
-          <ActionPanel>
-            <Action.CopyToClipboard title="Copy Raw Output" content={health.raw} />
-          </ActionPanel>
-        }
-      />
-    );
-  }
+  const health = healthPromise.data;
+  const healthUnparseable = health && Object.keys(health.scalars).length === 0;
+  const s = { ...(snapshot.data?.scalars ?? {}), ...(health?.scalars ?? {}) };
+  const probing = healthPromise.isLoading;
+  const peerHealthById = new Map(health?.peers.map((p) => [p.nodeId, p]) ?? []);
+  // Node rows come from the instant snapshot; fall back to health's peer
+  // list if the snapshot itself failed.
+  const peerRows =
+    snapshot.data?.peers.map((pc) => ({ config: pc, health: peerHealthById.get(pc.nodeId) })) ??
+    health?.peers.map((ph) => ({ config: undefined, health: ph as PeerHealth | undefined })) ??
+    [];
 
-  const s = health?.scalars ?? {};
-  const wrapKeyByNode = new Map(data?.peerRecords.map((r) => [r.fields.node_id, r.fields.wrap_public_key]) ?? []);
+  const healthRow = healthUnparseable
+    ? {
+        icon: { source: Icon.QuestionMarkCircle, tintColor: Color.Orange },
+        title: `Health: unparseable output (exit ${health.exitCode})`,
+        subtitle: "Copy raw output from the action panel",
+      }
+    : health
+      ? { icon: statusIcon(health.status), title: `Health: ${health.status}`, subtitle: s.cluster_id }
+      : healthPromise.error
+        ? {
+            icon: { source: Icon.XMarkCircle, tintColor: Color.Red },
+            title: "Health: probe failed",
+            subtitle: String((healthPromise.error as Error).message ?? healthPromise.error).slice(0, 80),
+          }
+        : {
+            icon: { source: Icon.CircleProgress25, tintColor: Color.SecondaryText },
+            title: "Health: probing peers…",
+            subtitle: "verifies ledger + probes all peers — ~30 s on this cluster",
+          };
 
   return (
-    <List isLoading={isLoading} searchBarPlaceholder="Filter nodes…">
-      {health && (
-        <List.Section title="Cluster">
-          <List.Item
-            icon={statusIcon(health.status)}
-            title={`Health: ${health.status}`}
-            subtitle={s.cluster_id}
-            accessories={[
-              { tag: { value: s.node_id ?? "?", color: Color.Blue }, tooltip: "Local node" },
-              { text: `quorum ${s.quorum ?? "?"}` },
-            ]}
-            actions={
-              <ActionPanel>
-                <CommonActions health={health} revalidate={revalidate} />
-              </ActionPanel>
-            }
-          />
-          <List.Item
-            icon={Icon.List}
-            title={`Ledger position ${s.latest_position ?? "?"}`}
-            subtitle={`checkpoint ${s.checkpoint_status ?? "?"} · ${s.latest_checkpoint_cosignatures ?? "0"} cosignature(s)`}
-            accessories={[{ text: `ledger_ok ${s.ledger_ok ?? "?"}` }]}
-            actions={
-              <ActionPanel>
-                <CommonActions health={health} revalidate={revalidate} />
-              </ActionPanel>
-            }
-          />
+    <List isLoading={snapshot.isLoading || probing} searchBarPlaceholder="Filter nodes…">
+      <List.Section title="Cluster">
+        <List.Item
+          icon={healthRow.icon}
+          title={healthRow.title}
+          subtitle={healthRow.subtitle ?? s.cluster_id}
+          accessories={[
+            { tag: { value: s.node_id ?? "?", color: Color.Blue }, tooltip: "Local node" },
+            { text: `quorum ${s.quorum ?? "?"}` },
+          ]}
+          actions={
+            <ActionPanel>
+              <CommonActions health={health} revalidate={revalidate} />
+              {healthUnparseable && <Action.CopyToClipboard title="Copy Raw Output" content={health.raw} />}
+            </ActionPanel>
+          }
+        />
+        <List.Item
+          icon={Icon.List}
+          title={
+            health
+              ? `Ledger position ${s.latest_position ?? "?"}`
+              : `Checkpoint position ${s.latest_checkpoint_position ?? "?"}`
+          }
+          subtitle={
+            health
+              ? `checkpoint ${s.checkpoint_status ?? "?"} · ${s.latest_checkpoint_cosignatures ?? "0"} cosignature(s)`
+              : `${s.checkpoints ?? "?"} checkpoints · ${s.latest_checkpoint_cosignatures ?? "0"} cosignature(s)`
+          }
+          accessories={[{ text: health ? `ledger_ok ${s.ledger_ok ?? "?"}` : "ledger check pending" }]}
+          actions={
+            <ActionPanel>
+              <CommonActions health={health} revalidate={revalidate} />
+            </ActionPanel>
+          }
+        />
+        {health && !healthUnparseable && (
           <List.Item
             icon={
               s.quorum_risk === "true" || (s.collisions ?? "0") !== "0" || (s.sync_errors ?? "0") !== "0"
@@ -178,48 +200,58 @@ export default function ClusterStatus() {
               </ActionPanel>
             }
           />
-        </List.Section>
-      )}
-      {health && (
-        <List.Section title="Nodes">
+        )}
+      </List.Section>
+      <List.Section title="Nodes">
+        {s.node_id && (
           <List.Item
             icon={{ source: Icon.CheckCircle, tintColor: Color.Green }}
-            title={s.node_id ?? "local"}
+            title={s.node_id}
             subtitle={s.listen}
-            accessories={[{ tag: { value: "local", color: Color.Blue } }, { text: `@ ${s.latest_position ?? "?"}` }]}
+            accessories={[
+              { tag: { value: "local", color: Color.Blue } },
+              { text: `@ ${s.latest_position ?? s.latest_checkpoint_position ?? "?"}` },
+            ]}
             actions={
               <ActionPanel>
                 <CommonActions health={health} revalidate={revalidate} />
               </ActionPanel>
             }
           />
-          {health.peers.map((peer) => (
+        )}
+        {peerRows.map(({ config: pc, health: ph }) => {
+          const nodeId = pc?.nodeId ?? ph?.nodeId ?? "?";
+          return (
             <List.Item
-              key={peer.nodeId}
-              icon={peerStatusIcon(peer.status)}
-              title={peer.nodeId}
-              subtitle={peer.endpoint}
-              accessories={[
-                ...(peer.lag > 0
-                  ? [{ tag: { value: `lag ${peer.lag}`, color: Color.Orange }, tooltip: "Operations behind" }]
-                  : []),
-                { text: `@ ${peer.cursorPosition}` },
-                ...(peer.lastSeen
-                  ? [{ date: new Date(peer.lastSeen), tooltip: `Last seen ${peer.lastSeen}` }]
-                  : [{ text: "never seen" }]),
-              ]}
+              key={nodeId}
+              icon={ph ? peerStatusIcon(ph.status) : { source: Icon.CircleProgress25, tintColor: Color.SecondaryText }}
+              title={nodeId}
+              subtitle={pc?.endpoint ?? ph?.endpoint}
+              accessories={
+                ph
+                  ? [
+                      ...(ph.lag > 0
+                        ? [{ tag: { value: `lag ${ph.lag}`, color: Color.Orange }, tooltip: "Operations behind" }]
+                        : []),
+                      { text: `@ ${ph.cursorPosition}` },
+                      ...(ph.lastSeen
+                        ? [{ date: new Date(ph.lastSeen), tooltip: `Last seen ${ph.lastSeen}` }]
+                        : [{ text: "never seen" }]),
+                    ]
+                  : [{ text: probing ? "probing…" : "no health data" }]
+              }
               actions={
                 <ActionPanel>
                   <CommonActions health={health} revalidate={revalidate} />
-                  {wrapKeyByNode.get(peer.nodeId) && (
-                    <Action.CopyToClipboard title="Copy Wrap Public Key" content={wrapKeyByNode.get(peer.nodeId)!} />
+                  {pc?.wrapPublicKey && (
+                    <Action.CopyToClipboard title="Copy Wrap Public Key" content={pc.wrapPublicKey} />
                   )}
                 </ActionPanel>
               }
             />
-          ))}
-        </List.Section>
-      )}
+          );
+        })}
+      </List.Section>
     </List>
   );
 }

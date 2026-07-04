@@ -1,7 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { clusterHealthFromOutput, expandTilde, parseKvOutput, peerHealthFromRecord } from "../src/hem/cluster";
+import {
+  clusterHealthFromOutput,
+  expandTilde,
+  parseKvOutput,
+  peerConfigFromRecord,
+  peerHealthFromRecord,
+} from "../src/hem/cluster";
 
 const fixture = (name: string) => readFileSync(join(__dirname, "fixtures", name), "utf8");
 
@@ -88,6 +94,27 @@ describe("peerHealthFromRecord", () => {
     expect(peer.lastSeen).toBeNull();
     expect(peer.error).toBeNull();
     expect(peer.lag).toBe(0);
+  });
+});
+
+describe("peerConfigFromRecord", () => {
+  const records = parseKvOutput(fixture("cluster-peers.txt")).records;
+
+  it("maps configured peers with endpoints and wrap keys", () => {
+    const peers = records.filter((r) => r.type === "peer").map(peerConfigFromRecord);
+    expect(peers).toHaveLength(5);
+    expect(peers.map((p) => p.nodeId)).toContain("hmn_elm05");
+    for (const peer of peers) {
+      expect(peer.endpoint).toMatch(/^http:\/\//);
+      expect(peer.publicKey).toBeTruthy();
+      expect(peer.wrapPublicKey).toBeTruthy();
+    }
+  });
+
+  it("nulls missing/dash keys", () => {
+    const peer = peerConfigFromRecord({ type: "peer", fields: { node_id: "x", endpoint: "e", public_key: "-" } });
+    expect(peer.publicKey).toBeNull();
+    expect(peer.wrapPublicKey).toBeNull();
   });
 });
 

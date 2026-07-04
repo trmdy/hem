@@ -1,5 +1,6 @@
 import { Cache, environment, Icon, launchCommand, LaunchType, MenuBarExtra, showHUD } from "@raycast/api";
 import { usePromise } from "@raycast/utils";
+import { useState } from "react";
 import { ClusterHealthStatus, getClusterHealth, PeerHealth, runCluster } from "../hem/cluster";
 import { getClient, getConfig } from "../hem/config";
 import { formatRef, protoToRef } from "../hem/refs";
@@ -19,24 +20,30 @@ interface MenuState {
   pendingCount: number;
   pending: PendingItem[];
   updatedAt: string;
+  clusterUpdatedAt: string | null;
 }
 
 const cache = new Cache();
 const STATE_KEY = "menu-bar-state";
+// `hem cluster health` verifies the ledger and probes every peer (~30 s on
+// this cluster) — never rerun it more often than this, even across opens.
+const CLUSTER_STALE_MS = 5 * 60_000;
 
-/**
- * Health RPC (cheap, unauthenticated) on every refresh; `hem cluster health`
- * + ListPendingApprovals only when the popover opens (user-initiated launch)
- * or on the background tick if the last known state was non-ok (spec §4.7).
- */
-async function loadState(): Promise<MenuState> {
-  let prev: MenuState | null = null;
+function readCachedState(): MenuState | null {
   try {
-    prev = JSON.parse(cache.get(STATE_KEY) ?? "null");
+    return JSON.parse(cache.get(STATE_KEY) ?? "null");
   } catch {
-    prev = null;
+    return null;
   }
+}
 
+function persist(state: MenuState): MenuState {
+  cache.set(STATE_KEY, JSON.stringify(state));
+  return state;
+}
+
+/** Fast pass: daemon Health RPC + pending approvals (both gRPC, <100 ms). */
+async function loadFast(prev: MenuState | null): Promise<MenuState> {
   let daemonOk = false;
   let daemonVersion: string | null = null;
   try {
@@ -47,9 +54,6 @@ async function loadState(): Promise<MenuState> {
     daemonOk = false;
   }
 
-  const heavy =
-    environment.launchType === LaunchType.UserInitiated || !prev || !prev.daemonOk || prev.clusterStatus !== "ok";
-
   const next: MenuState = {
     daemonOk,
     daemonVersion,
@@ -59,37 +63,56 @@ async function loadState(): Promise<MenuState> {
     pendingCount: prev?.pendingCount ?? 0,
     pending: prev?.pending ?? [],
     updatedAt: new Date().toISOString(),
+    clusterUpdatedAt: prev?.clusterUpdatedAt ?? null,
   };
 
-  if (heavy) {
+  if (daemonOk) {
     try {
-      const cluster = await getClusterHealth(getConfig().hemBinary);
-      next.clusterStatus = cluster.status;
-      next.localNode = {
-        nodeId: cluster.scalars.node_id ?? "local",
-        position: cluster.scalars.latest_position ?? "?",
-      };
-      next.peers = cluster.peers;
+      const approvals = await getClient().listPendingApprovals(50);
+      next.pendingCount = approvals.length;
+      next.pending = approvals.slice(0, 10).map((a) => ({
+        id: a.request_id,
+        ref: a.secret ? formatRef(protoToRef(a.secret.scope, a.secret.name)) : "?",
+        action: a.action || "get",
+      }));
     } catch {
-      next.clusterStatus = null;
-    }
-    if (daemonOk) {
-      try {
-        const approvals = await getClient().listPendingApprovals(50);
-        next.pendingCount = approvals.length;
-        next.pending = approvals.slice(0, 10).map((a) => ({
-          id: a.request_id,
-          ref: a.secret ? formatRef(protoToRef(a.secret.scope, a.secret.name)) : "?",
-          action: a.action || "get",
-        }));
-      } catch {
-        // keep previous approval state; metadata only, never values
-      }
+      // keep previous approval state; metadata only, never values
     }
   }
+  return persist(next);
+}
 
-  cache.set(STATE_KEY, JSON.stringify(next));
-  return next;
+/**
+ * Slow pass (spec §4.7 + staleness guard): run `hem cluster health` only when
+ * the cached probe is older than CLUSTER_STALE_MS AND the launch is
+ * user-initiated, we have no probe yet, or the last known state was non-ok.
+ */
+function shouldProbeCluster(state: MenuState): boolean {
+  const fresh = state.clusterUpdatedAt && Date.now() - Date.parse(state.clusterUpdatedAt) < CLUSTER_STALE_MS;
+  if (fresh) return false;
+  return (
+    environment.launchType === LaunchType.UserInitiated ||
+    !state.clusterUpdatedAt ||
+    !state.daemonOk ||
+    state.clusterStatus !== "ok"
+  );
+}
+
+async function loadCluster(prev: MenuState): Promise<MenuState> {
+  const next = { ...prev };
+  try {
+    const cluster = await getClusterHealth(getConfig().hemBinary);
+    next.clusterStatus = cluster.status;
+    next.localNode = {
+      nodeId: cluster.scalars.node_id ?? "local",
+      position: cluster.scalars.latest_position ?? "?",
+    };
+    next.peers = cluster.peers;
+    next.clusterUpdatedAt = new Date().toISOString();
+  } catch {
+    next.clusterStatus = null;
+  }
+  return persist(next);
 }
 
 function stateIcon(state: MenuState | undefined): Icon {
@@ -117,22 +140,39 @@ function peerIcon(status: PeerHealth["status"]): Icon {
 
 export default function HemMenuBar() {
   const config = getConfig();
-  const { data, isLoading, revalidate } = usePromise(loadState, []);
+  // Render immediately from the cached state; fast pass updates it in
+  // <100 ms, the ~30 s cluster probe streams in afterwards if due.
+  const [data, setData] = useState<MenuState | null>(readCachedState);
+  const [probing, setProbing] = useState(false);
+  const { isLoading, revalidate } = usePromise(async () => {
+    const fast = await loadFast(readCachedState());
+    setData(fast);
+    if (shouldProbeCluster(fast)) {
+      setProbing(true);
+      try {
+        setData(await loadCluster(fast));
+      } finally {
+        setProbing(false);
+      }
+    }
+  }, []);
 
   return (
     <MenuBarExtra
       isLoading={isLoading}
-      icon={stateIcon(data)}
+      icon={stateIcon(data ?? undefined)}
       title={data && data.pendingCount > 0 ? `${data.pendingCount}` : undefined}
       tooltip="Hem"
     >
       <MenuBarExtra.Item
         title={
           data?.daemonOk
-            ? `hemd ok${data.daemonVersion ? ` · v${data.daemonVersion}` : ""} · cluster ${data.clusterStatus ?? "unknown"}`
+            ? `hemd ok${data.daemonVersion ? ` · v${data.daemonVersion}` : ""} · cluster ${
+                data.clusterStatus ?? (probing ? "probing…" : "unknown")
+              }`
             : `hemd unreachable at ${config.endpoint}`
         }
-        icon={stateIcon(data)}
+        icon={stateIcon(data ?? undefined)}
         onAction={() => launchCommand({ name: "cluster-status", type: LaunchType.UserInitiated })}
       />
       {data && (data.localNode || data.peers.length > 0) && (
