@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #eef0f2; }
+  ::selection { background: #26282c; color: #fff; }
+</style>
+</helmet>
+<section style="padding:56px;display:flex;flex-direction:column;gap:72px;align-items:flex-start;font-family:'Geist','Helvetica Neue',sans-serif">
+
+  <div style="display:flex;flex-direction:column;gap:8px;max-width:720px">
+    <div style="font-size:22px;font-weight:600;color:#26282c;letter-spacing:-0.01em">Hem Desk — v3, simplified</div>
+    <div style="font-size:13px;color:#6b7075;line-height:1.5">Same screens and keyboard model, roughly half the elements. Rows carry one idea; metadata moved behind focus or into detail. <a href="#1a" style="color:#26282c">1a</a> Vault · <a href="#1b" style="color:#26282c">1b</a> New Secret · <a href="#1c" style="color:#26282c">1c</a> Mesh · <a href="#1d" style="color:#26282c">1d</a> Overview · <a href="#1e" style="color:#26282c">1e</a> Approvals · <a href="#1f" style="color:#26282c">1f</a> Command palette · <a href="#1g" style="color:#26282c">1g</a> Details</div>
+  </div>
+
+  <!-- ================= 1a VAULT ================= -->
+  <div id="1a" style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <a href="#1a" style="text-decoration:none;font-family:'Geist Mono',monospace;font-size:11px;font-weight:600;background:#26282c;color:#fff;padding:2px 7px;border-radius:4px">1a</a>
+      <span style="font-size:14px;font-weight:600;color:#26282c">Vault</span>
+      <span style="font-size:13px;color:#82878e">list rows are just name + time · actions live on the focused row</span>
+    </div>
+    <div data-screen-label="Vault" style="width:1280px;height:800px;background:#fff;border:1px solid #e3e5e8;border-radius:10px;overflow:hidden;box-shadow:0 4px 20px rgba(16,24,40,0.05);display:flex;flex-direction:column;box-sizing:border-box">
+
+      <div style="height:44px;display:flex;align-items:center;gap:7px;padding:0 16px;border-bottom:1px solid #e6e8eb;flex-shrink:0">
+        <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+        <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+        <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+        <span style="margin-left:12px;font-size:13px;font-weight:600;color:#26282c">Hem Desk</span>
+        <span style="flex:1"></span>
+        <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#82878e">Search<span style="font-family:'Geist Mono',monospace;font-size:10px;line-height:17px;padding:0 6px;border:1px solid #dadde0;border-radius:4px;color:#6b7075;background:#fff">⌘K</span></span>
+      </div>
+
+      <div style="flex:1;display:flex;min-height:0">
+        <div style="width:200px;background:#f4f5f6;border-right:1px solid #e6e8eb;display:flex;flex-direction:column;padding:12px 10px;flex-shrink:0;box-sizing:border-box">
+          <div style="display:flex;flex-direction:column;gap:2px">
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Overview</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘1</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;background:#e7e9ec;color:#26282c;font-weight:600"><span style="flex:1">Vault</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘2</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Mesh</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘3</span></div>
+            <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Approvals</span><span style="font-family:'Geist Mono',monospace;font-size:10px;font-weight:600;color:#26282c">2</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘4</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Tokens</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘5</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Audit</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘6</span></div>
+          </div>
+          <div style="flex:1"></div>
+          <div style="display:flex;align-items:center;gap:7px;padding:0 10px;font-size:12px;color:#6b7075"><span style="width:6px;height:6px;border-radius:50%;background:#3e9b63"></span>hemd running</div>
+        </div>
+
+        <div style="width:300px;border-right:1px solid #e6e8eb;display:flex;flex-direction:column;flex-shrink:0;box-sizing:border-box;overflow:hidden">
+          <div style="padding:12px 14px">
+            <div style="display:flex;align-items:center;gap:8px;border:1px solid #e6e8eb;border-radius:6px;padding:7px 11px;background:#fff">
+              <span style="flex:1;font-size:13px;color:#9ca1a8">Filter</span>
+              <span style="font-family:'Geist Mono',monospace;font-size:10px;line-height:17px;padding:0 6px;border:1px solid #dadde0;border-radius:4px;color:#6b7075">/</span>
+            </div>
+          </div>
+          <div style="flex:1;overflow:hidden;padding:0 10px">
+            <div style="padding:10px 10px 6px;font-family:'Geist Mono',monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#9ca1a8">global</div>
+            <div style="display:flex;align-items:baseline;gap:8px;padding:8px 10px;border-radius:6px"><span style="flex:1;font-size:13px;font-weight:500;color:#26282c">anthropic-api-key</span><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8">2h</span></div>
+            <div style="display:flex;align-items:baseline;gap:8px;padding:8px 10px;border-radius:6px"><span style="flex:1;font-size:13px;font-weight:500;color:#26282c">fiken-oauth</span><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8">1d</span></div>
+            <div style="display:flex;align-items:baseline;gap:8px;padding:8px 10px;border-radius:6px"><span style="flex:1;font-size:13px;font-weight:500;color:#26282c">tailscale-authkey</span><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8">3d</span></div>
+            <div style="padding:14px 10px 6px;font-family:'Geist Mono',monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#9ca1a8">project/globex</div>
+            <div style="display:flex;align-items:baseline;gap:8px;padding:8px 10px;border-radius:6px"><span style="flex:1;font-size:13px;font-weight:500;color:#26282c">linear</span><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8">Jun 30</span></div>
+            <div style="display:flex;align-items:baseline;gap:8px;padding:8px 10px;border-radius:6px"><span style="flex:1;font-size:13px;font-weight:500;color:#26282c">vercel-deploy</span><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8">Jun 29</span></div>
+            <div style="padding:14px 10px 6px;font-family:'Geist Mono',monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#9ca1a8">project/acme</div>
+            <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;background:#eeeff2"><span style="flex:1;font-size:13px;font-weight:600;color:#26282c">openai-prod</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#6b7075;border:1px solid #c7cbd1;background:#fff;border-radius:4px;padding:0 5px;line-height:16px">⏎</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#6b7075;border:1px solid #c7cbd1;background:#fff;border-radius:4px;padding:0 5px;line-height:16px">⌘C</span></div>
+            <div style="display:flex;align-items:baseline;gap:8px;padding:8px 10px;border-radius:6px"><span style="flex:1;font-size:13px;font-weight:500;color:#26282c">openai-stg</span><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8">Jul 1</span></div>
+            <div style="display:flex;align-items:baseline;gap:8px;padding:8px 10px;border-radius:6px"><span style="flex:1;font-size:13px;font-weight:500;color:#26282c">postgres-main</span><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8">Jun 27</span></div>
+            <div style="padding:14px 10px 6px;font-family:'Geist Mono',monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#9ca1a8">identity/vis-7f31</div>
+            <div style="display:flex;align-items:baseline;gap:8px;padding:8px 10px;border-radius:6px"><span style="flex:1;font-size:13px;font-weight:500;color:#26282c">github</span><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8">Jun 30</span></div>
+            <div style="display:flex;align-items:baseline;gap:8px;padding:8px 10px;border-radius:6px"><span style="flex:1;font-size:13px;font-weight:500;color:#26282c">ssh-signing</span><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8">Jun 22</span></div>
+          </div>
+        </div>
+
+        <div style="flex:1;background:#fafafa;overflow:hidden;padding:32px 36px;display:flex;flex-direction:column;gap:24px;box-sizing:border-box">
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;align-items:center;gap:12px">
+              <span style="flex:1;font-family:'Geist Mono',monospace;font-size:19px;font-weight:600;color:#26282c;letter-spacing:-0.01em">project/acme/openai-prod</span>
+              <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#4a4f55;border:1px solid #dadde0;background:#fff;border-radius:6px;padding:5px 11px">Rotate<span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">R</span></span>
+              <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#4a4f55;border:1px solid #dadde0;background:#fff;border-radius:6px;padding:5px 11px">Delete<span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘⌫</span></span>
+            </div>
+            <div style="font-size:12.5px;color:#82878e">Requires approval · updated Jul 3 by <span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:#6b7075">hmn_main</span></div>
+          </div>
+
+          <div style="background:#fff;border:1px solid #e6e8eb;border-radius:8px;box-shadow:0 1px 2px rgba(16,24,40,0.04)">
+            <div style="display:flex;align-items:center;gap:16px;padding:12px 12px;margin:4px;border-radius:6px;background:#eeeff2">
+              <span style="width:120px;font-family:'Geist Mono',monospace;font-size:13px;color:#26282c;padding-left:6px">api_key</span>
+              <span style="flex:1;font-family:'Geist Mono',monospace;font-size:13px;color:#6b7075;letter-spacing:0.05em">••••••••••••••••7f2a</span>
+              <span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:500;color:#fff;background:#26282c;border-radius:6px;padding:4px 10px">Copy<span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:rgba(255,255,255,0.65)">⌘C</span></span>
+              <span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#4a4f55;border:1px solid #dadde0;background:#fff;border-radius:6px;padding:3px 10px">Reveal<span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#9ca1a8">⌘R</span></span>
+            </div>
+            <div style="display:flex;align-items:center;gap:16px;padding:14px 22px;border-top:1px solid #f0f1f3">
+              <span style="width:120px;font-family:'Geist Mono',monospace;font-size:13px;color:#26282c">org_id</span>
+              <span style="flex:1;font-family:'Geist Mono',monospace;font-size:13px;color:#6b7075;letter-spacing:0.05em">••••••••••••37vt</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:16px;padding:14px 22px;border-top:1px solid #f0f1f3">
+              <span style="width:120px;font-family:'Geist Mono',monospace;font-size:13px;color:#26282c">project_id</span>
+              <span style="flex:1;font-family:'Geist Mono',monospace;font-size:13px;color:#6b7075;letter-spacing:0.05em">••••••••••pk04</span>
+            </div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <span style="font-family:'Geist Mono',monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#9ca1a8">Access</span>
+            <div style="display:flex;align-items:center;gap:10px;font-size:12.5px;color:#4a4f55"><span style="font-family:'Geist Mono',monospace;font-size:12px;color:#26282c">tok_ci_deploy</span><span style="color:#9ca1a8">get, via approval</span></div>
+            <div style="display:flex;align-items:center;gap:10px;font-size:12.5px;color:#4a4f55"><span style="font-family:'Geist Mono',monospace;font-size:12px;color:#26282c">tok_acme_dev</span><span style="color:#9ca1a8">get</span></div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <span style="font-family:'Geist Mono',monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#9ca1a8">History</span>
+            <div style="display:flex;align-items:baseline;gap:12px;font-size:12.5px;color:#4a4f55"><span style="font-family:'Geist Mono',monospace;font-size:11.5px;font-weight:600;color:#26282c">v7</span><span style="flex:1">rotated api_key</span><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8">Jul 3</span></div>
+            <div style="display:flex;align-items:baseline;gap:12px;font-size:12.5px;color:#4a4f55"><span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:#82878e">v6</span><span style="flex:1">added project_id</span><span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8">Jun 29</span></div>
+            <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:#82878e;padding-top:2px">All versions<span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#9ca1a8">H</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="height:30px;border-top:1px solid #e6e8eb;display:flex;align-items:center;gap:18px;padding:0 16px;font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8;flex-shrink:0">
+        <span>↑↓ move</span><span>⌘C copy</span><span>⌘N new</span>
+        <span style="flex:1"></span><span>98 secrets</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 1b NEW SECRET ================= -->
+  <div id="1b" style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <a href="#1b" style="text-decoration:none;font-family:'Geist Mono',monospace;font-size:11px;font-weight:600;background:#26282c;color:#fff;padding:2px 7px;border-radius:4px">1b</a>
+      <span style="font-size:14px;font-weight:600;color:#26282c">New Secret</span>
+      <span style="font-size:13px;color:#82878e">one column, one decision per group</span>
+    </div>
+    <div data-screen-label="New Secret" style="width:1280px;height:800px;background:#fff;border:1px solid #e3e5e8;border-radius:10px;overflow:hidden;box-shadow:0 4px 20px rgba(16,24,40,0.05);position:relative;box-sizing:border-box">
+      <div style="position:absolute;inset:0;background:#fafafa"></div>
+      <div style="position:absolute;left:50%;top:96px;transform:translateX(-50%);width:560px;background:#fff;border:1px solid #e6e8eb;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,0.07);display:flex;flex-direction:column">
+        <div style="display:flex;align-items:center;padding:18px 24px;border-bottom:1px solid #f0f1f3">
+          <span style="flex:1;font-size:14px;font-weight:600;color:#26282c">New secret</span>
+          <span style="font-family:'Geist Mono',monospace;font-size:10px;line-height:17px;padding:0 6px;border:1px solid #dadde0;border-radius:4px;color:#6b7075">esc</span>
+        </div>
+        <div style="padding:24px;display:flex;flex-direction:column;gap:22px">
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <span style="font-size:12px;font-weight:500;color:#6b7075">Scope</span>
+            <div style="display:flex;gap:10px;align-items:center">
+              <div style="display:inline-flex;border:1px solid #e6e8eb;border-radius:6px;overflow:hidden;background:#f7f8f9">
+                <span style="font-size:12px;color:#6b7075;padding:6px 15px">global</span>
+                <span style="font-size:12px;font-weight:600;color:#26282c;background:#fff;padding:6px 15px;border-left:1px solid #e6e8eb;border-right:1px solid #e6e8eb">project</span>
+                <span style="font-size:12px;color:#6b7075;padding:6px 15px">identity</span>
+              </div>
+              <div style="position:relative;display:inline-flex;flex-direction:column">
+                <div style="display:inline-flex;align-items:center;gap:8px;border:1px solid #e6e8eb;border-radius:6px;padding:6px 13px;background:#fff;width:150px;box-sizing:border-box">
+                  <span style="font-family:'Geist Mono',monospace;font-size:12px;color:#26282c">hemtj</span><span style="width:1px;height:14px;background:#26282c"></span>
+                  <span style="flex:1"></span>
+                  <span style="font-size:9px;color:#9ca1a8">▾</span>
+                </div>
+                <div style="position:absolute;top:34px;left:0;width:210px;background:#fff;border:1px solid #e6e8eb;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.07);padding:6px;display:flex;flex-direction:column;z-index:2">
+                  <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:6px;background:#eeeff2"><span style="flex:1;font-size:12.5px;color:#26282c">Create "<span style="font-family:'Geist Mono',monospace;font-size:12px;font-weight:600">hemtj</span>"</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⏎</span></div>
+                  <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px"><span style="font-family:'Geist Mono',monospace;font-size:12px;color:#6b7075">globex</span></div>
+                  <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px"><span style="font-family:'Geist Mono',monospace;font-size:12px;color:#6b7075">acme</span></div>
+                </div>
+              </div>
+            </div>
+            <span style="font-size:12px;color:#9ca1a8">Type to filter projects — a new name creates one.</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <span style="font-size:12px;font-weight:500;color:#6b7075">Name</span>
+            <div style="display:flex;align-items:center;border-radius:6px;padding:9px 13px;background:#fff;box-shadow:0 0 0 1.5px #c7cbd1,0 0 0 4px #eef0f3">
+              <span style="font-family:'Geist Mono',monospace;font-size:13px;color:#26282c">notion-sync</span><span style="width:1px;height:15px;background:#26282c;margin-left:1px"></span>
+            </div>
+            <div style="font-size:12px;color:#6b7075"><span style="font-family:'Geist Mono',monospace;font-size:11.5px">project/globex/notion-sync</span> is available</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <span style="font-size:12px;font-weight:500;color:#6b7075">Keys</span>
+            <div style="display:flex;gap:8px">
+              <div style="width:170px;border:1px solid #e6e8eb;border-radius:6px;padding:8px 13px;font-family:'Geist Mono',monospace;font-size:12.5px;color:#26282c">api_token</div>
+              <div style="flex:1;border:1px solid #e6e8eb;border-radius:6px;padding:8px 13px;font-family:'Geist Mono',monospace;font-size:12.5px;color:#6b7075;letter-spacing:0.05em">••••••••••••••••••••</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;padding:2px 0"><span style="font-size:12px;color:#6b7075">Add key</span><span style="font-family:'Geist Mono',monospace;font-size:10px;line-height:17px;padding:0 6px;border:1px solid #dadde0;border-radius:4px;color:#6b7075">⇧⏎</span><span style="flex:1"></span><span style="font-size:12px;color:#9ca1a8">or paste a .env — it splits into keys</span></div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:flex-end;gap:16px;padding:16px 24px;border-top:1px solid #f0f1f3">
+          <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#82878e">Cancel<span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">esc</span></span>
+          <span style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;color:#fff;background:#26282c;border-radius:6px;padding:7px 15px">Create secret<span style="font-family:'Geist Mono',monospace;font-size:10px;color:rgba(255,255,255,0.65)">⌘⏎</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 1c MESH ================= -->
+  <div id="1c" style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <a href="#1c" style="text-decoration:none;font-family:'Geist Mono',monospace;font-size:11px;font-weight:600;background:#26282c;color:#fff;padding:2px 7px;border-radius:4px">1c</a>
+      <span style="font-size:14px;font-weight:600;color:#26282c">Mesh</span>
+      <span style="font-size:13px;color:#82878e">node cards down to id + one status line · detail lives behind ⏎</span>
+    </div>
+    <div data-screen-label="Mesh" style="width:1280px;height:800px;background:#fff;border:1px solid #e3e5e8;border-radius:10px;overflow:hidden;box-shadow:0 4px 20px rgba(16,24,40,0.05);display:flex;flex-direction:column;box-sizing:border-box">
+      <div style="height:44px;display:flex;align-items:center;gap:7px;padding:0 16px;border-bottom:1px solid #e6e8eb;flex-shrink:0">
+        <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+        <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+        <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+        <span style="margin-left:12px;font-size:13px;font-weight:600;color:#26282c">Hem Desk</span>
+        <span style="flex:1"></span>
+        <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#82878e">Search<span style="font-family:'Geist Mono',monospace;font-size:10px;line-height:17px;padding:0 6px;border:1px solid #dadde0;border-radius:4px;color:#6b7075;background:#fff">⌘K</span></span>
+      </div>
+      <div style="flex:1;display:flex;min-height:0">
+        <div style="width:200px;background:#f4f5f6;border-right:1px solid #e6e8eb;display:flex;flex-direction:column;padding:12px 10px;flex-shrink:0;box-sizing:border-box">
+          <div style="display:flex;flex-direction:column;gap:2px">
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Overview</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘1</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Vault</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘2</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;background:#e7e9ec;color:#26282c;font-weight:600"><span style="flex:1">Mesh</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘3</span></div>
+            <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Approvals</span><span style="font-family:'Geist Mono',monospace;font-size:10px;font-weight:600;color:#26282c">2</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘4</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Tokens</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘5</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Audit</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘6</span></div>
+          </div>
+          <div style="flex:1"></div>
+          <div style="display:flex;align-items:center;gap:7px;padding:0 10px;font-size:12px;color:#6b7075"><span style="width:6px;height:6px;border-radius:50%;background:#3e9b63"></span>hemd running</div>
+        </div>
+        <div style="flex:1;background:#fafafa;display:flex;flex-direction:column;min-width:0">
+          <div style="display:flex;align-items:center;padding:28px 36px 0;gap:16px">
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <span style="display:flex;align-items:center;gap:9px;font-size:18px;font-weight:600;color:#26282c;letter-spacing:-0.01em"><span style="width:8px;height:8px;border-radius:50%;background:#d9a514"></span>Warning</span>
+              <span style="font-size:13px;color:#6b7075">5 of 6 nodes at position <span style="font-family:'Geist Mono',monospace;font-size:12px">7856</span> · <span style="font-family:'Geist Mono',monospace;font-size:12px">elm05</span> is a month behind</span>
+            </div>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;color:#fff;background:#26282c;border-radius:6px;padding:7px 15px">Sync now<span style="font-family:'Geist Mono',monospace;font-size:10px;color:rgba(255,255,255,0.65)">S</span></span>
+          </div>
+          <div style="flex:1;padding:28px 36px;display:grid;grid-template-columns:repeat(3,1fr);grid-auto-rows:min-content;gap:14px;align-content:start">
+            <div style="background:#fff;border:1px solid #e6e8eb;border-radius:8px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,0.04);display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px"><span style="width:7px;height:7px;border-radius:50%;background:#3e9b63"></span><span style="flex:1;font-family:'Geist Mono',monospace;font-size:13px;font-weight:600;color:#26282c">hmn_main</span><span style="font-size:11px;color:#9ca1a8">this machine</span></div>
+              <div style="font-size:12.5px;color:#6b7075">caught up · <span style="font-family:'Geist Mono',monospace;font-size:11.5px">7856</span> · now</div>
+            </div>
+            <div style="background:#fff;border:1px solid #e6e8eb;border-radius:8px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,0.04);display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px"><span style="width:7px;height:7px;border-radius:50%;background:#3e9b63"></span><span style="flex:1;font-family:'Geist Mono',monospace;font-size:13px;font-weight:600;color:#26282c">hmn_alder01</span></div>
+              <div style="font-size:12.5px;color:#6b7075">caught up · <span style="font-family:'Geist Mono',monospace;font-size:11.5px">7856</span> · 3s ago</div>
+            </div>
+            <div style="background:#fff;border:1px solid #e6e8eb;border-radius:8px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,0.04);display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px"><span style="width:7px;height:7px;border-radius:50%;background:#3e9b63"></span><span style="flex:1;font-family:'Geist Mono',monospace;font-size:13px;font-weight:600;color:#26282c">hmn_laptop</span></div>
+              <div style="font-size:12.5px;color:#6b7075">caught up · <span style="font-family:'Geist Mono',monospace;font-size:11.5px">7856</span> · 41s ago</div>
+            </div>
+            <div style="background:#fff;border:1px solid #e6e8eb;border-radius:8px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,0.04);display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px"><span style="width:7px;height:7px;border-radius:50%;background:#3e9b63"></span><span style="flex:1;font-family:'Geist Mono',monospace;font-size:13px;font-weight:600;color:#26282c">hmn_srv1</span></div>
+              <div style="font-size:12.5px;color:#6b7075">caught up · <span style="font-family:'Geist Mono',monospace;font-size:11.5px">7856</span> · 8s ago</div>
+            </div>
+            <div style="background:#fff;border:1px solid #e6e8eb;border-radius:8px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,0.04);display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px"><span style="width:7px;height:7px;border-radius:50%;background:#3e9b63"></span><span style="flex:1;font-family:'Geist Mono',monospace;font-size:13px;font-weight:600;color:#26282c">hmn_nas</span></div>
+              <div style="font-size:12.5px;color:#6b7075">caught up · <span style="font-family:'Geist Mono',monospace;font-size:11.5px">7856</span> · 2m ago</div>
+            </div>
+            <div style="background:#fff;border:1px solid #c2c7cd;border-radius:8px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,0.04);display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px"><span style="width:7px;height:7px;border-radius:50%;background:#d9a514"></span><span style="flex:1;font-family:'Geist Mono',monospace;font-size:13px;font-weight:600;color:#26282c">hmn_elm05</span></div>
+              <div style="font-size:12.5px;color:#26282c;font-weight:500">6,541 behind · last seen Jun 3</div>
+              <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:#6b7075;padding-top:2px">Copy wake command<span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:#9ca1a8">⌘.</span></div>
+            </div>
+          </div>
+          <div style="padding:0 36px 24px;font-size:12px;color:#9ca1a8">Cluster <span style="font-family:'Geist Mono',monospace;font-size:11px">hcl_demo_2c9f</span> · checkpoint #112, quorum met · 0 collisions</div>
+        </div>
+      </div>
+      <div style="height:30px;border-top:1px solid #e6e8eb;display:flex;align-items:center;gap:18px;padding:0 16px;font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8;flex-shrink:0">
+        <span>↑↓←→ nodes</span><span>⏎ detail</span><span>S sync</span>
+        <span style="flex:1"></span><span>last sync 14:31</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 1d OVERVIEW ================= -->
+  <div id="1d" style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <a href="#1d" style="text-decoration:none;font-family:'Geist Mono',monospace;font-size:11px;font-weight:600;background:#26282c;color:#fff;padding:2px 7px;border-radius:4px">1d</a>
+      <span style="font-size:14px;font-weight:600;color:#26282c">Overview</span>
+      <span style="font-size:13px;color:#82878e">three answers, five events, nothing else</span>
+    </div>
+    <div data-screen-label="Overview" style="width:1280px;height:800px;background:#fff;border:1px solid #e3e5e8;border-radius:10px;overflow:hidden;box-shadow:0 4px 20px rgba(16,24,40,0.05);display:flex;flex-direction:column;box-sizing:border-box">
+      <div style="height:44px;display:flex;align-items:center;gap:7px;padding:0 16px;border-bottom:1px solid #e6e8eb;flex-shrink:0">
+        <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+        <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+        <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+        <span style="margin-left:12px;font-size:13px;font-weight:600;color:#26282c">Hem Desk</span>
+        <span style="flex:1"></span>
+        <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#82878e">Search<span style="font-family:'Geist Mono',monospace;font-size:10px;line-height:17px;padding:0 6px;border:1px solid #dadde0;border-radius:4px;color:#6b7075;background:#fff">⌘K</span></span>
+      </div>
+      <div style="flex:1;display:flex;min-height:0">
+        <div style="width:200px;background:#f4f5f6;border-right:1px solid #e6e8eb;display:flex;flex-direction:column;padding:12px 10px;flex-shrink:0;box-sizing:border-box">
+          <div style="display:flex;flex-direction:column;gap:2px">
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;background:#e7e9ec;color:#26282c;font-weight:600"><span style="flex:1">Overview</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘1</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Vault</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘2</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Mesh</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘3</span></div>
+            <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Approvals</span><span style="font-family:'Geist Mono',monospace;font-size:10px;font-weight:600;color:#26282c">2</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘4</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Tokens</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘5</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Audit</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘6</span></div>
+          </div>
+          <div style="flex:1"></div>
+          <div style="display:flex;align-items:center;gap:7px;padding:0 10px;font-size:12px;color:#6b7075"><span style="width:6px;height:6px;border-radius:50%;background:#3e9b63"></span>hemd running</div>
+        </div>
+        <div style="flex:1;background:#fafafa;padding:32px 36px;display:flex;flex-direction:column;gap:20px;min-width:0;box-sizing:border-box">
+          <div style="font-size:18px;font-weight:600;color:#26282c;letter-spacing:-0.01em">Good afternoon.</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
+            <div style="background:#fff;border:1px solid #e6e8eb;border-radius:8px;padding:20px 22px;box-shadow:0 1px 2px rgba(16,24,40,0.04);display:flex;flex-direction:column;gap:6px">
+              <span style="font-size:12px;color:#82878e">Daemon</span>
+              <span style="display:flex;align-items:center;gap:8px;font-size:16px;font-weight:600;color:#26282c"><span style="width:7px;height:7px;border-radius:50%;background:#3e9b63"></span>Running</span>
+              <span style="font-size:12.5px;color:#9ca1a8">v0.9.4 · up 11 days</span>
+            </div>
+            <div style="background:#fff;border:1px solid #e6e8eb;border-radius:8px;padding:20px 22px;box-shadow:0 1px 2px rgba(16,24,40,0.04);display:flex;flex-direction:column;gap:6px">
+              <span style="font-size:12px;color:#82878e">Mesh</span>
+              <span style="display:flex;align-items:center;gap:8px;font-size:16px;font-weight:600;color:#26282c"><span style="width:7px;height:7px;border-radius:50%;background:#d9a514"></span>Warning</span>
+              <span style="font-size:12.5px;color:#9ca1a8"><span style="font-family:'Geist Mono',monospace;font-size:11.5px">elm05</span> a month behind · <span style="color:#6b7075">⌘3</span></span>
+            </div>
+            <div style="background:#fff;border:1px solid #e6e8eb;border-radius:8px;padding:20px 22px;box-shadow:0 1px 2px rgba(16,24,40,0.04);display:flex;flex-direction:column;gap:6px">
+              <span style="font-size:12px;color:#82878e">Approvals</span>
+              <span style="font-size:16px;font-weight:600;color:#26282c">2 pending</span>
+              <span style="font-size:12.5px;color:#9ca1a8">oldest 14m · <span style="color:#6b7075">⌘4</span></span>
+            </div>
+          </div>
+          <div style="background:#fff;border:1px solid #e6e8eb;border-radius:8px;box-shadow:0 1px 2px rgba(16,24,40,0.04);display:flex;flex-direction:column;overflow:hidden">
+            <div style="display:flex;align-items:center;padding:14px 22px;border-bottom:1px solid #f0f1f3"><span style="flex:1;font-size:12px;font-weight:500;color:#6b7075">Recent activity</span><span style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:#9ca1a8">Audit<span style="font-family:'Geist Mono',monospace;font-size:9.5px">⌘6</span></span></div>
+            <div style="display:flex;align-items:baseline;gap:16px;padding:11px 22px"><span style="font-family:'Geist Mono',monospace;font-size:11px;color:#9ca1a8;width:52px">14:22</span><span style="font-size:12.5px;color:#4a4f55;width:120px">rotated</span><span style="flex:1;font-family:'Geist Mono',monospace;font-size:11.5px;color:#26282c">project/acme/openai-prod</span></div>
+            <div style="display:flex;align-items:baseline;gap:16px;padding:11px 22px;border-top:1px solid #f6f7f8"><span style="font-family:'Geist Mono',monospace;font-size:11px;color:#9ca1a8;width:52px">13:58</span><span style="font-size:12.5px;color:#4a4f55;width:120px">approval asked</span><span style="flex:1;font-family:'Geist Mono',monospace;font-size:11.5px;color:#26282c">project/acme/openai-prod</span></div>
+            <div style="display:flex;align-items:baseline;gap:16px;padding:11px 22px;border-top:1px solid #f6f7f8"><span style="font-family:'Geist Mono',monospace;font-size:11px;color:#9ca1a8;width:52px">11:31</span><span style="font-size:12.5px;color:#4a4f55;width:120px">checkpoint</span><span style="flex:1;font-family:'Geist Mono',monospace;font-size:11.5px;color:#26282c">#112 cosigned at 7800</span></div>
+            <div style="display:flex;align-items:baseline;gap:16px;padding:11px 22px;border-top:1px solid #f6f7f8"><span style="font-family:'Geist Mono',monospace;font-size:11px;color:#9ca1a8;width:52px">09:41</span><span style="font-size:12.5px;color:#4a4f55;width:120px">approved</span><span style="flex:1;font-family:'Geist Mono',monospace;font-size:11.5px;color:#26282c">global/fiken-oauth → tok_fiken_sync</span></div>
+            <div style="display:flex;align-items:baseline;gap:16px;padding:11px 22px;border-top:1px solid #f6f7f8"><span style="font-family:'Geist Mono',monospace;font-size:11px;color:#9ca1a8;width:52px">Jul 3</span><span style="font-size:12.5px;color:#4a4f55;width:120px">node rejoined</span><span style="flex:1;font-family:'Geist Mono',monospace;font-size:11.5px;color:#26282c">hmn_laptop · caught up in 41s</span></div>
+          </div>
+          <div style="font-size:12.5px;color:#9ca1a8">98 secrets across 6 scopes · most in <span style="font-family:'Geist Mono',monospace;font-size:11.5px">global</span> (31) and <span style="font-family:'Geist Mono',monospace;font-size:11.5px">project/acme</span> (24)</div>
+        </div>
+      </div>
+      <div style="height:30px;border-top:1px solid #e6e8eb;display:flex;align-items:center;gap:18px;padding:0 16px;font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8;flex-shrink:0">
+        <span>⌘K palette</span><span>⌘1–6 sections</span>
+        <span style="flex:1"></span><span>Sun Jul 5 · 14:36</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 1e APPROVALS ================= -->
+  <div id="1e" style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <a href="#1e" style="text-decoration:none;font-family:'Geist Mono',monospace;font-size:11px;font-weight:600;background:#26282c;color:#fff;padding:2px 7px;border-radius:4px">1e</a>
+      <span style="font-size:14px;font-weight:600;color:#26282c">Approvals</span>
+      <span style="font-size:13px;color:#82878e">one request per card · deny confirms inline · receipt stays compact</span>
+    </div>
+    <div data-screen-label="Approvals" style="width:1280px;height:800px;background:#fff;border:1px solid #e3e5e8;border-radius:10px;overflow:hidden;box-shadow:0 4px 20px rgba(16,24,40,0.05);display:flex;flex-direction:column;box-sizing:border-box">
+      <div style="height:44px;display:flex;align-items:center;gap:7px;padding:0 16px;border-bottom:1px solid #e6e8eb;flex-shrink:0">
+        <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+        <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+        <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+        <span style="margin-left:12px;font-size:13px;font-weight:600;color:#26282c">Hem Desk</span>
+        <span style="flex:1"></span>
+        <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#82878e">Search<span style="font-family:'Geist Mono',monospace;font-size:10px;line-height:17px;padding:0 6px;border:1px solid #dadde0;border-radius:4px;color:#6b7075;background:#fff">⌘K</span></span>
+      </div>
+      <div style="flex:1;display:flex;min-height:0">
+        <div style="width:200px;background:#f4f5f6;border-right:1px solid #e6e8eb;display:flex;flex-direction:column;padding:12px 10px;flex-shrink:0;box-sizing:border-box">
+          <div style="display:flex;flex-direction:column;gap:2px">
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Overview</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘1</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Vault</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘2</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Mesh</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘3</span></div>
+            <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:6px;font-size:13px;background:#e7e9ec;color:#26282c;font-weight:600"><span style="flex:1">Approvals</span><span style="font-family:'Geist Mono',monospace;font-size:10px;font-weight:600;color:#26282c">2</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘4</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Tokens</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘5</span></div>
+            <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;color:#4a4f55"><span style="flex:1">Audit</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘6</span></div>
+          </div>
+          <div style="flex:1"></div>
+          <div style="display:flex;align-items:center;gap:7px;padding:0 10px;font-size:12px;color:#6b7075"><span style="width:6px;height:6px;border-radius:50%;background:#3e9b63"></span>hemd running</div>
+        </div>
+        <div style="flex:1;background:#fafafa;padding:32px 36px;display:flex;flex-direction:column;gap:16px;min-width:0;overflow:hidden;box-sizing:border-box">
+          <div style="font-size:18px;font-weight:600;color:#26282c;letter-spacing:-0.01em">2 pending</div>
+
+          <div style="background:#fff;border-radius:8px;box-shadow:0 0 0 1.5px #c7cbd1,0 0 0 4px #e7e9ec,0 1px 2px rgba(16,24,40,0.04);padding:20px 24px;display:flex;flex-direction:column;gap:12px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="flex:1;font-size:13.5px;color:#26282c"><span style="font-family:'Geist Mono',monospace;font-size:12.5px;font-weight:600">tok_ci_deploy</span> wants to <span style="font-weight:600">get</span> <span style="font-family:'Geist Mono',monospace;font-size:12.5px;font-weight:600">project/acme/openai-prod</span></span>
+              <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#9ca1a8">14m</span>
+            </div>
+            <div style="font-size:12.5px;color:#6b7075">"release build 2026.27" · from <span style="font-family:'Geist Mono',monospace;font-size:11.5px">hmn_srv1</span></div>
+            <div style="display:flex;align-items:center;gap:12px;padding-top:2px">
+              <span style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;color:#fff;background:#26282c;border-radius:6px;padding:6px 15px">Approve<span style="font-family:'Geist Mono',monospace;font-size:10px;color:rgba(255,255,255,0.65)">A</span></span>
+              <span style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:#4a4f55;border:1px solid #dadde0;background:#fff;border-radius:6px;padding:5px 15px">Deny<span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">D</span></span>
+            </div>
+          </div>
+
+          <div style="background:#fff;border:1px solid #e6e8eb;border-radius:8px;box-shadow:0 1px 2px rgba(16,24,40,0.04);padding:20px 24px;display:flex;flex-direction:column;gap:12px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="flex:1;font-size:13.5px;color:#26282c"><span style="font-family:'Geist Mono',monospace;font-size:12.5px;font-weight:600">tok_globex_ci</span> wants to <span style="font-weight:600">delete</span> <span style="font-family:'Geist Mono',monospace;font-size:12.5px;font-weight:600">project/globex/vercel-deploy</span></span>
+              <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#9ca1a8">2h</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:14px;border-top:1px solid #f0f1f3;padding-top:12px">
+              <span style="flex:1;font-size:12.5px;color:#26282c">Deny this request? The token will see "denied by owner".</span>
+              <span style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:#26282c;background:#fff;border:1px solid #c2c7cd;border-radius:6px;padding:5px 13px">Confirm deny<span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⏎</span></span>
+              <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#82878e">Keep<span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">esc</span></span>
+            </div>
+          </div>
+
+          <div style="background:#fff;border:1px solid #e6e8eb;border-radius:8px;box-shadow:0 1px 2px rgba(16,24,40,0.04);padding:20px 24px;display:flex;flex-direction:column;gap:12px;margin-top:8px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="flex:1;font-size:13px;color:#6b7075">Approved 09:41 — <span style="font-family:'Geist Mono',monospace;font-size:12px;color:#26282c">global/fiken-oauth</span> → <span style="font-family:'Geist Mono',monospace;font-size:12px;color:#26282c">tok_fiken_sync</span></span>
+            </div>
+            <div style="display:flex;gap:16px;align-items:center">
+              <span style="flex:1;background:#f7f8f9;border:1px solid #dadde0;border-radius:6px;padding:11px 15px;font-family:'Geist Mono',monospace;font-size:12px;color:#26282c">hemr_1_a9f2c41d7be0 · one get before 10:41</span>
+              <span style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:#26282c;background:#fff;border:1px solid #c2c7cd;border-radius:6px;padding:6px 13px;white-space:nowrap">Copy receipt<span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘C</span></span>
+            </div>
+            <span style="font-size:11.5px;color:#9ca1a8">Shown once. hem doesn't store it.</span>
+          </div>
+        </div>
+      </div>
+      <div style="height:30px;border-top:1px solid #e6e8eb;display:flex;align-items:center;gap:18px;padding:0 16px;font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8;flex-shrink:0">
+        <span>↑↓ requests</span><span>A approve</span><span>D deny</span>
+        <span style="flex:1"></span><span>oldest 14m</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 1f COMMAND PALETTE ================= -->
+  <div id="1f" style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <a href="#1f" style="text-decoration:none;font-family:'Geist Mono',monospace;font-size:11px;font-weight:600;background:#26282c;color:#fff;padding:2px 7px;border-radius:4px">1f</a>
+      <span style="font-size:14px;font-weight:600;color:#26282c">Command palette</span>
+      <span style="font-size:13px;color:#82878e">⌘K · one line per result · ⌘⏎ still copies in two keystrokes</span>
+    </div>
+    <div data-screen-label="Command palette" style="width:1280px;height:800px;background:#fff;border:1px solid #e3e5e8;border-radius:10px;overflow:hidden;box-shadow:0 4px 20px rgba(16,24,40,0.05);position:relative;box-sizing:border-box">
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+        <div style="height:44px;display:flex;align-items:center;gap:7px;padding:0 16px;border-bottom:1px solid #e6e8eb;flex-shrink:0">
+          <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+          <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+          <span style="width:11px;height:11px;border-radius:50%;background:#dfe2e5"></span>
+          <span style="margin-left:12px;font-size:13px;font-weight:600;color:#26282c">Hem Desk</span>
+        </div>
+        <div style="flex:1;display:flex;min-height:0">
+          <div style="width:200px;background:#f4f5f6;border-right:1px solid #e6e8eb;display:flex;flex-direction:column;padding:12px 10px;flex-shrink:0;box-sizing:border-box">
+            <div style="display:flex;flex-direction:column;gap:2px">
+              <div style="display:flex;align-items:center;padding:7px 10px;font-size:13px;color:#4a4f55"><span style="flex:1">Overview</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘1</span></div>
+              <div style="display:flex;align-items:center;padding:7px 10px;border-radius:6px;font-size:13px;background:#e7e9ec;color:#26282c;font-weight:600"><span style="flex:1">Vault</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘2</span></div>
+              <div style="display:flex;align-items:center;padding:7px 10px;font-size:13px;color:#4a4f55"><span style="flex:1">Mesh</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘3</span></div>
+              <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;font-size:13px;color:#4a4f55"><span style="flex:1">Approvals</span><span style="font-family:'Geist Mono',monospace;font-size:10px;font-weight:600;color:#26282c">2</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘4</span></div>
+              <div style="display:flex;align-items:center;padding:7px 10px;font-size:13px;color:#4a4f55"><span style="flex:1">Tokens</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘5</span></div>
+              <div style="display:flex;align-items:center;padding:7px 10px;font-size:13px;color:#4a4f55"><span style="flex:1">Audit</span><span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘6</span></div>
+            </div>
+            <div style="flex:1"></div>
+            <div style="display:flex;align-items:center;gap:7px;padding:0 10px;font-size:12px;color:#6b7075"><span style="width:6px;height:6px;border-radius:50%;background:#3e9b63"></span>hemd running</div>
+          </div>
+          <div style="width:300px;border-right:1px solid #e6e8eb;flex-shrink:0;padding:12px 14px;box-sizing:border-box">
+            <div style="display:flex;align-items:center;gap:8px;border:1px solid #e6e8eb;border-radius:6px;padding:7px 11px"><span style="flex:1;font-size:13px;color:#9ca1a8">Filter</span><span style="font-family:'Geist Mono',monospace;font-size:10px;line-height:17px;padding:0 6px;border:1px solid #dadde0;border-radius:4px;color:#6b7075">/</span></div>
+          </div>
+          <div style="flex:1;background:#fafafa;padding:32px 36px;box-sizing:border-box">
+            <span style="font-family:'Geist Mono',monospace;font-size:19px;font-weight:600;color:#26282c">project/acme/openai-prod</span>
+          </div>
+        </div>
+        <div style="height:30px;border-top:1px solid #e6e8eb;flex-shrink:0"></div>
+      </div>
+
+      <div style="position:absolute;inset:0;background:rgba(38,40,44,0.16)"></div>
+      <div style="position:absolute;left:50%;top:120px;transform:translateX(-50%);width:580px;background:#fff;border:1px solid #e6e8eb;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,0.07),0 24px 64px rgba(16,24,40,0.12);display:flex;flex-direction:column;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:2px;padding:15px 20px;border-bottom:1px solid #f0f1f3">
+          <span style="font-family:'Geist Mono',monospace;font-size:15px;color:#26282c">open</span>
+          <span style="width:1.5px;height:18px;background:#26282c"></span>
+          <span style="flex:1"></span>
+          <span style="font-family:'Geist Mono',monospace;font-size:10px;line-height:17px;padding:0 6px;border:1px solid #dadde0;border-radius:4px;color:#6b7075">esc</span>
+        </div>
+        <div style="padding:8px;display:flex;flex-direction:column">
+          <div style="padding:8px 12px 4px;font-size:11px;color:#9ca1a8">Secrets</div>
+          <div style="display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:6px;background:#eeeff2">
+            <span style="font-family:'Geist Mono',monospace;font-size:13px;color:#26282c"><span style="font-weight:600">open</span>ai-prod</span>
+            <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#9ca1a8">project/acme</span>
+            <span style="flex:1"></span>
+            <span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:#6b7075"><span style="font-family:'Geist Mono',monospace;font-size:10px;border:1px solid #c7cbd1;background:#fff;border-radius:4px;padding:0 5px;line-height:16px">⌘⏎</span>copy api_key</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:6px">
+            <span style="font-family:'Geist Mono',monospace;font-size:13px;color:#26282c"><span style="font-weight:600">open</span>ai-stg</span>
+            <span style="font-family:'Geist Mono',monospace;font-size:11px;color:#9ca1a8">project/acme</span>
+          </div>
+          <div style="padding:10px 12px 4px;font-size:11px;color:#9ca1a8">Actions</div>
+          <div style="display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:6px">
+            <span style="font-size:13px;color:#26282c"><span style="font-weight:600">Open</span> Mesh</span>
+            <span style="flex:1"></span>
+            <span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘3</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:6px">
+            <span style="font-size:13px;color:#26282c"><span style="font-weight:600">Open</span> Audit</span>
+            <span style="flex:1"></span>
+            <span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘6</span>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:16px;padding:10px 20px;border-top:1px solid #f0f1f3;font-family:'Geist Mono',monospace;font-size:10.5px;color:#9ca1a8">
+          <span>↑↓</span><span>⏎ open</span><span>⌘⏎ copy value</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 1g DETAILS ================= -->
+  <div id="1g" style="display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <a href="#1g" style="text-decoration:none;font-family:'Geist Mono',monospace;font-size:11px;font-weight:600;background:#26282c;color:#fff;padding:2px 7px;border-radius:4px">1g</a>
+      <span style="font-size:14px;font-weight:600;color:#26282c">Details</span>
+      <span style="font-size:13px;color:#82878e">value cycle · inline confirm · empty + error states</span>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:24px;max-width:1280px">
+
+      <div style="width:440px;display:flex;flex-direction:column;gap:8px">
+        <span style="font-size:11px;color:#9ca1a8">Value cycle — masked → revealed → copied</span>
+        <div style="background:#fff;border:1px solid #e3e5e8;border-radius:8px;box-shadow:0 1px 2px rgba(16,24,40,0.04);padding:14px;display:flex;flex-direction:column">
+          <div style="display:flex;align-items:center;gap:14px;padding:10px 10px">
+            <span style="width:90px;font-family:'Geist Mono',monospace;font-size:13px;color:#26282c">api_key</span>
+            <span style="flex:1;font-family:'Geist Mono',monospace;font-size:13px;color:#6b7075;letter-spacing:0.05em">••••••••••••7f2a</span>
+            <span style="font-size:11px;color:#9ca1a8">masked</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:14px;padding:10px 10px;border-top:1px solid #f0f1f3">
+            <span style="width:90px;font-family:'Geist Mono',monospace;font-size:13px;color:#26282c">api_key</span>
+            <span style="flex:1;font-family:'Geist Mono',monospace;font-size:12.5px;color:#26282c;background:#f0f1f3;border-radius:4px;padding:1px 7px">sk-kx82…f1c37f2a</span>
+            <span style="font-size:11px;color:#9ca1a8">remasks in 6s</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:14px;padding:10px 10px;border-top:1px solid #f0f1f3">
+            <span style="width:90px;font-family:'Geist Mono',monospace;font-size:13px;color:#26282c">api_key</span>
+            <span style="flex:1;font-size:12.5px;color:#26282c;font-weight:500">Copied — clipboard clears in 20s</span>
+            <span style="font-size:11px;color:#9ca1a8">after ⌘C</span>
+          </div>
+        </div>
+      </div>
+
+      <div style="width:500px;display:flex;flex-direction:column;gap:8px">
+        <span style="font-size:11px;color:#9ca1a8">Destructive confirm — inline, target named</span>
+        <div style="background:#fff;border:1px solid #e3e5e8;border-radius:8px;box-shadow:0 1px 2px rgba(16,24,40,0.04);padding:14px;display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;align-items:center;gap:12px;border-radius:6px;padding:11px 13px;background:#eeeff2">
+            <span style="flex:1;font-size:12.5px;color:#26282c">Delete key <span style="font-family:'Geist Mono',monospace;font-size:11.5px;font-weight:600">project_id</span> from <span style="font-family:'Geist Mono',monospace;font-size:11.5px">openai-prod</span>?</span>
+            <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:#fff;background:#26282c;border-radius:6px;padding:4px 11px">Delete<span style="font-family:'Geist Mono',monospace;font-size:9.5px;color:rgba(255,255,255,0.65)">⏎</span></span>
+            <span style="display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:#82878e">Keep<span style="font-family:'Geist Mono',monospace;font-size:9.5px">esc</span></span>
+          </div>
+          <div style="font-size:11.5px;color:#9ca1a8;padding:0 2px">The confirm replaces the row it acts on — never a modal, and the target is always named.</div>
+        </div>
+      </div>
+
+      <div style="width:400px;display:flex;flex-direction:column;gap:8px">
+        <span style="font-size:11px;color:#9ca1a8">Approvals — empty state</span>
+        <div style="background:#fff;border:1px solid #e3e5e8;border-radius:8px;box-shadow:0 1px 2px rgba(16,24,40,0.04);padding:36px 28px;display:flex;flex-direction:column;gap:8px;align-items:flex-start">
+          <span style="font-size:17px;font-weight:600;color:#26282c">Nothing needs you.</span>
+          <span style="font-size:12.5px;color:#6b7075;line-height:1.6">Last request approved today 09:41.<br>Past decisions are in Audit <span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⌘6</span></span>
+        </div>
+      </div>
+
+      <div style="width:460px;display:flex;flex-direction:column;gap:8px">
+        <span style="font-size:11px;color:#9ca1a8">Error — daemon unreachable</span>
+        <div style="background:#fff;border:1px solid #c2c7cd;border-radius:8px;box-shadow:0 1px 2px rgba(16,24,40,0.04);padding:24px;display:flex;flex-direction:column;gap:12px;align-items:flex-start">
+          <span style="font-size:14.5px;font-weight:600;color:#26282c">hemd isn't reachable at 127.0.0.1:50091.</span>
+          <span style="font-size:12.5px;color:#6b7075;line-height:1.6">Your vault is intact on disk. Relaunch the daemon:</span>
+          <div style="align-self:stretch;border:1px solid #e6e8eb;background:#f7f8f9;border-radius:6px;padding:10px 14px;font-family:'Geist Mono',monospace;font-size:12px;color:#26282c">launchctl kickstart -k gui/501/no.trmd.hemd</div>
+          <div style="display:flex;gap:12px">
+            <span style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;color:#fff;background:#26282c;border-radius:6px;padding:6px 14px">Copy command<span style="font-family:'Geist Mono',monospace;font-size:10px;color:rgba(255,255,255,0.65)">⌘C</span></span>
+            <span style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:#4a4f55;border:1px solid #dadde0;background:#fff;border-radius:6px;padding:5px 14px">Retry<span style="font-family:'Geist Mono',monospace;font-size:10px;color:#9ca1a8">⏎</span></span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+</x-dc>
+</body>
+</html>
+
