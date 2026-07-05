@@ -1,0 +1,34 @@
+/* The @stylex directive is replaced with the compiled StyleX rules by
+   @stylexjs/postcss-plugin at build time. */
+@stylex;
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #ffffff;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+::selection {
+  background: #26282c;
+  color: #fff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+input,
+textarea,
+button {
+  font: inherit;
+  color: inherit;
+}
