@@ -32,6 +32,20 @@ export function relTimeSeconds(iso: string | null | undefined): string {
   return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
 }
 
+/** Future-facing horizon for expiries: "in 23h", "in 29d", or a date. */
+export function untilTime(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '';
+  const seconds = Math.floor((t - Date.now()) / 1000);
+  if (seconds <= 0) return 'expired';
+  if (seconds < 3600) return `in ${Math.max(1, Math.floor(seconds / 60))}m`;
+  if (seconds < 86400) return `in ${Math.floor(seconds / 3600)}h`;
+  if (seconds < 60 * 86400) return `in ${Math.floor(seconds / 86400)}d`;
+  const d = new Date(t);
+  return `${MONTHS[d.getMonth()]} ${d.getDate()} ${d.getFullYear()}`;
+}
+
 /** "14:22" for today, "Jul 3" otherwise — the Overview activity idiom. */
 export function timeOrDate(iso: string | null | undefined): string {
   if (!iso) return '';

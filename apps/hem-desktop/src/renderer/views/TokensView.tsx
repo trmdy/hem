@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { IssueTokenResult, TokenRow } from '../../shared/types';
 import { errorText, invoke, useTokens } from '../lib/api';
-import { dateShort, relTime } from '../lib/fmt';
+import { untilTime } from '../lib/fmt';
 import { useKeys } from '../lib/keys';
 import { Button, Dot, Kbd, SectionLabel } from '../components/ui';
 import { colors, fonts, shadows } from '../theme/tokens.stylex';
@@ -373,10 +373,12 @@ export function TokensView({ keysEnabled }: { keysEnabled: boolean }) {
               <span {...stylex.props(s.tokenType)}>{t.tokenType}</span>
               <span {...stylex.props(s.tokenWho)}>
                 {t.serviceName || t.identityId || t.project || (t.tokenType === 'operator' ? 'this machine' : '')}
-                {t.scopes.length ? ` · ${t.scopes.join(', ')}` : ''}
+                {t.scopes.length
+                  ? ` · ${t.scopes.map((sc) => sc.replace(/^SECRET_SCOPE_/, '').toLowerCase()).join(', ')}`
+                  : ''}
               </span>
               <span {...stylex.props(s.tokenDates, Boolean(expSoon) && s.expiringSoon)}>
-                {t.expiresAt ? `expires ${relTime(t.expiresAt) || dateShort(t.expiresAt)}` : ''}
+                {t.expiresAt ? `expires ${untilTime(t.expiresAt)}` : ''}
               </span>
               {isFocused ? (
                 <Button variant="smallSecondary" shortcut="R" onClick={() => setConfirmingRevoke(t.tokenId)}>
