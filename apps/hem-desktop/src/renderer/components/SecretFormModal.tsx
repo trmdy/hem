@@ -7,49 +7,7 @@ import { errorText, invoke, useVaultList } from '../lib/api';
 import { Button, Kbd } from './ui';
 import { colors, fonts, shadows } from '../theme/tokens.stylex';
 
-// Ported normalization rules (hem-raycast src/hem/env.ts / refs.ts):
-export function slugify(input: string): string {
-  return input
-    .toLowerCase()
-    .replace(/[\s_.]+/g, '-')
-    .replace(/[^a-z0-9-]/g, '')
-    .replace(/-{2,}/g, '-');
-}
-
-export function normalizeEnvKey(raw: string): string {
-  const normalized = raw
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  return normalized || 'value';
-}
-
-export function parseEnvText(text: string): Array<{ key: string; value: string }> {
-  const entries: Array<{ key: string; value: string }> = [];
-  for (const rawLine of text.split(/\r?\n/)) {
-    let line = rawLine.trim();
-    if (!line || line.startsWith('#') || line.startsWith('//')) continue;
-    if (line.startsWith('export ')) line = line.slice('export '.length).trimStart();
-    const eq = line.indexOf('=');
-    if (eq <= 0) continue;
-    const originalKey = line.slice(0, eq).trim();
-    if (!originalKey || /\s/.test(originalKey)) continue;
-    let value = line.slice(eq + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
-      (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
-    ) {
-      value = value.slice(1, -1);
-    } else {
-      const hash = value.indexOf(' #');
-      if (hash >= 0) value = value.slice(0, hash).trim();
-    }
-    if (!value) continue;
-    entries.push({ key: normalizeEnvKey(originalKey), value });
-  }
-  return entries;
-}
+import { normalizeEnvKey, parseEnvText, slugify } from '../../shared/env';
 
 const s = stylex.create({
   backdrop: {
