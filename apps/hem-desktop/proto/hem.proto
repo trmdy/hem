@@ -1,0 +1,693 @@
+syntax = "proto3";
+
+package valhall.hem.v1;
+
+service HemRuntime {
+  // Secrets
+  rpc SetSecret(SetSecretRequest) returns (SecretInfo);
+  rpc GetSecret(GetSecretRequest) returns (GetSecretResponse);
+  rpc GetSecretInfo(GetSecretInfoRequest) returns (SecretInfo);
+  rpc DeleteSecret(DeleteSecretRequest) returns (DeleteSecretResponse);
+  rpc ListSecrets(ListSecretsRequest) returns (ListSecretsResponse);
+  rpc GetSecrets(GetSecretsRequest) returns (GetSecretsResponse);
+  rpc ScanForSecrets(ScanForSecretsRequest) returns (ScanForSecretsResponse);
+
+  // Groups
+  rpc SetGroup(SetGroupRequest) returns (GroupInfo);
+  rpc AddToGroup(AddToGroupRequest) returns (GroupInfo);
+  rpc RemoveFromGroup(RemoveFromGroupRequest) returns (RemoveFromGroupResponse);
+  rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
+  rpc ListGroupSecrets(ListGroupSecretsRequest) returns (ListGroupSecretsResponse);
+
+  // Tokens
+  rpc IssueAgentToken(IssueAgentTokenRequest) returns (IssueTokenResponse);
+  rpc IssueServiceToken(IssueServiceTokenRequest) returns (IssueTokenResponse);
+  rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
+  rpc ListActiveTokens(ListActiveTokensRequest) returns (ListActiveTokensResponse);
+
+  // Grants
+  rpc GrantAccess(GrantAccessRequest) returns (GrantInfo);
+  rpc RevokeAccess(RevokeAccessRequest) returns (RevokeAccessResponse);
+  rpc ListGrants(ListGrantsRequest) returns (ListGrantsResponse);
+
+  // Approvals
+  rpc ListPendingApprovals(ListPendingApprovalsRequest) returns (ListPendingApprovalsResponse);
+  rpc ApproveAccess(ResolveApprovalRequest) returns (ResolveApprovalResponse);
+  rpc DenyAccess(ResolveApprovalRequest) returns (ResolveApprovalResponse);
+  rpc GetApprovalStatus(GetApprovalStatusRequest) returns (ApprovalStatusResponse);
+
+  // Audit
+  rpc GetAuditLog(GetAuditLogRequest) returns (GetAuditLogResponse);
+
+  // Peer replication
+  rpc PeerHello(PeerHelloRequest) returns (PeerHelloResponse);
+  rpc PeerApproveRead(PeerApproveReadRequest) returns (PeerApproveReadResponse);
+  rpc PeerApproveCollision(PeerApproveCollisionRequest) returns (PeerApproveCollisionResponse);
+  rpc PeerRouteMasterApproval(PeerRouteMasterApprovalRequest) returns (PeerRouteMasterApprovalResponse);
+  rpc PeerGetMasterApprovalStatus(PeerGetMasterApprovalStatusRequest) returns (PeerGetMasterApprovalStatusResponse);
+  rpc PeerConsumeMasterApprovalReceipt(PeerConsumeMasterApprovalReceiptRequest) returns (PeerConsumeMasterApprovalReceiptResponse);
+  rpc PeerListOperations(PeerListOperationsRequest) returns (PeerListOperationsResponse);
+  rpc PeerAckOperations(PeerAckOperationsRequest) returns (PeerAckOperationsResponse);
+  rpc PeerPushOperations(PeerPushOperationsRequest) returns (PeerPushOperationsResponse);
+  rpc PeerCosignCheckpoint(PeerCosignCheckpointRequest) returns (PeerCosignCheckpointResponse);
+
+  // Admin
+  rpc InitHem(InitHemRequest) returns (InitHemResponse);
+  rpc RotateMasterKey(RotateMasterKeyRequest) returns (RotateMasterKeyResponse);
+  rpc ExportSecrets(ExportSecretsRequest) returns (ExportSecretsResponse);
+  rpc ImportSecrets(ImportSecretsRequest) returns (ImportSecretsResponse);
+
+  // Health
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+enum SecretScope {
+  SECRET_SCOPE_UNSPECIFIED = 0;
+  SECRET_SCOPE_GLOBAL = 1;
+  SECRET_SCOPE_PROJECT = 2;
+  SECRET_SCOPE_IDENTITY = 3;
+}
+
+enum TokenType {
+  TOKEN_TYPE_UNSPECIFIED = 0;
+  TOKEN_TYPE_OPERATOR = 1;
+  TOKEN_TYPE_SERVICE = 2;
+  TOKEN_TYPE_AGENT_RUN = 3;
+}
+
+enum ApprovalState {
+  APPROVAL_STATE_UNSPECIFIED = 0;
+  APPROVAL_STATE_PENDING = 1;
+  APPROVAL_STATE_APPROVED = 2;
+  APPROVAL_STATE_DENIED = 3;
+  APPROVAL_STATE_TIMED_OUT = 4;
+}
+
+message ScopeSelector {
+  SecretScope scope = 1;
+  string project = 2;
+  string identity_id = 3;
+}
+
+message SecretRef {
+  ScopeSelector scope = 1;
+  string name = 2;
+}
+
+message ScopeResolutionContext {
+  string identity_id = 1;
+  string project = 2;
+}
+
+message SecretValue {
+  string key = 1;
+  string value = 2;
+}
+
+message SecretInfo {
+  ScopeSelector scope = 1;
+  string name = 2;
+  string description = 3;
+  bool requires_approval = 4;
+  string group = 5;
+  string created_at = 6;
+  string updated_at = 7;
+  string created_by = 8;
+  string last_accessed_at = 9;
+  string last_accessed_by = 10;
+}
+
+message SecretWithValues {
+  SecretInfo info = 1;
+  map<string, string> values = 2;
+}
+
+message SetSecretRequest {
+  SecretRef secret = 1;
+  repeated SecretValue values = 2;
+  string description = 3;
+  bool requires_approval = 4;
+  string group = 5;
+  string actor = 6;
+  string approval_receipt = 7;
+  string reason = 8;
+}
+
+message GetSecretRequest {
+  oneof lookup {
+    SecretRef secret = 1;
+    string name = 2;
+  }
+  ScopeResolutionContext context = 3;
+  string key = 4;
+  bool async_read = 5;
+  uint64 wait_timeout_ms = 6;
+  string reason = 7;
+  string approval_receipt = 8;
+}
+
+message PendingApproval {
+  string request_id = 1;
+  ApprovalState state = 2;
+  string message = 3;
+}
+
+message GetSecretResponse {
+  oneof result {
+    SecretWithValues secret = 1;
+    PendingApproval pending = 2;
+  }
+}
+
+message GetSecretInfoRequest {
+  oneof lookup {
+    SecretRef secret = 1;
+    string name = 2;
+  }
+  ScopeResolutionContext context = 3;
+}
+
+message DeleteSecretRequest {
+  SecretRef secret = 1;
+  string actor = 2;
+  string approval_receipt = 3;
+  string reason = 4;
+}
+
+message DeleteSecretResponse {
+  bool deleted = 1;
+  string approval_request_id = 2;
+  ApprovalState approval_state = 3;
+}
+
+message ListSecretsRequest {
+  ScopeSelector scope = 1;
+  string group = 2;
+  string prefix = 3;
+  uint32 limit = 4;
+}
+
+message ListSecretsResponse {
+  repeated SecretInfo secrets = 1;
+}
+
+message SecretBatchRequestItem {
+  oneof lookup {
+    SecretRef secret = 1;
+    string name = 2;
+  }
+  ScopeResolutionContext context = 3;
+  string key = 4;
+  bool async_read = 5;
+  uint64 wait_timeout_ms = 6;
+  string reason = 7;
+}
+
+message GetSecretsRequest {
+  repeated SecretBatchRequestItem requests = 1;
+}
+
+message SecretBatchResult {
+  oneof result {
+    SecretWithValues secret = 1;
+    PendingApproval pending = 2;
+  }
+  string error = 3;
+}
+
+message GetSecretsResponse {
+  repeated SecretBatchResult results = 1;
+}
+
+message ScanForSecretsRequest {
+  string text = 1;
+  ScopeSelector scope = 2;
+  uint32 min_value_length = 3;
+}
+
+message ScanMatch {
+  string secret_ref = 1;
+  string key = 2;
+  uint32 offset = 3;
+}
+
+message ScanForSecretsResponse {
+  bool clean = 1;
+  repeated ScanMatch matches = 2;
+  uint32 scanned_length = 3;
+  uint32 secrets_checked = 4;
+}
+
+message GroupInfo {
+  string name = 1;
+  string description = 2;
+  string created_at = 3;
+  string updated_at = 4;
+}
+
+message SetGroupRequest {
+  string name = 1;
+  string description = 2;
+}
+
+message AddToGroupRequest {
+  SecretRef secret = 1;
+  string group = 2;
+}
+
+message RemoveFromGroupRequest {
+  SecretRef secret = 1;
+}
+
+message RemoveFromGroupResponse {
+  bool updated = 1;
+}
+
+message ListGroupsRequest {}
+
+message ListGroupsResponse {
+  repeated GroupInfo groups = 1;
+}
+
+message ListGroupSecretsRequest {
+  string group = 1;
+}
+
+message ListGroupSecretsResponse {
+  repeated SecretInfo secrets = 1;
+}
+
+message TokenInfo {
+  string token_id = 1;
+  TokenType token_type = 2;
+  string issued_at = 3;
+  string expires_at = 4;
+  string issued_by = 5;
+  string service_name = 6;
+  string identity_id = 7;
+  string project = 8;
+  repeated SecretScope scopes = 9;
+}
+
+message IssueAgentTokenRequest {
+  string identity_id = 1;
+  string project = 2;
+  repeated SecretScope scopes = 3;
+  uint64 ttl_seconds = 4;
+  string issued_by_service = 5;
+}
+
+message IssueServiceTokenRequest {
+  string service_name = 1;
+  uint64 ttl_seconds = 2;
+  string issued_by = 3;
+}
+
+message IssueTokenResponse {
+  string token = 1;
+  TokenInfo info = 2;
+}
+
+message RevokeTokenRequest {
+  string token_id = 1;
+  string actor = 2;
+}
+
+message RevokeTokenResponse {
+  bool revoked = 1;
+}
+
+message ListActiveTokensRequest {
+  TokenType token_type = 1;
+  string service_name = 2;
+  string identity_id = 3;
+  uint32 limit = 4;
+}
+
+message ListActiveTokensResponse {
+  repeated TokenInfo tokens = 1;
+}
+
+message GrantInfo {
+  SecretRef secret = 1;
+  ScopeSelector grantee_scope = 2;
+  string grantee_id = 3;
+  string created_at = 4;
+  string created_by = 5;
+}
+
+message GrantAccessRequest {
+  SecretRef secret = 1;
+  ScopeSelector grantee_scope = 2;
+  string grantee_id = 3;
+  string actor = 4;
+}
+
+message RevokeAccessRequest {
+  SecretRef secret = 1;
+  ScopeSelector grantee_scope = 2;
+  string grantee_id = 3;
+  string actor = 4;
+}
+
+message RevokeAccessResponse {
+  bool revoked = 1;
+}
+
+message ListGrantsRequest {
+  SecretRef secret = 1;
+}
+
+message ListGrantsResponse {
+  repeated GrantInfo grants = 1;
+}
+
+message ApprovalRequestInfo {
+  string request_id = 1;
+  ApprovalState state = 2;
+  SecretRef secret = 3;
+  string requester_token_id = 4;
+  string requester_identity_id = 5;
+  string requester_project = 6;
+  string reason = 7;
+  string created_at = 8;
+  string resolved_at = 9;
+  string resolved_by = 10;
+  string resolve_message = 11;
+  string action = 12;
+  string secret_version = 13;
+}
+
+message ListPendingApprovalsRequest {
+  uint32 limit = 1;
+}
+
+message ListPendingApprovalsResponse {
+  repeated ApprovalRequestInfo requests = 1;
+}
+
+message ResolveApprovalRequest {
+  string request_id = 1;
+  string actor = 2;
+  string message = 3;
+}
+
+message ResolveApprovalResponse {
+  ApprovalRequestInfo request = 1;
+  string approval_receipt = 2;
+}
+
+message GetApprovalStatusRequest {
+  string request_id = 1;
+}
+
+message ApprovalStatusResponse {
+  ApprovalRequestInfo request = 1;
+}
+
+message AuditEntry {
+  string audit_id = 1;
+  string ts = 2;
+  string action = 3;
+  string actor = 4;
+  string token_id = 5;
+  SecretRef secret = 6;
+  string result = 7;
+  string details = 8;
+}
+
+message GetAuditLogRequest {
+  ScopeSelector scope = 1;
+  string since = 2;
+  string until = 3;
+  uint32 limit = 4;
+}
+
+message GetAuditLogResponse {
+  repeated AuditEntry entries = 1;
+}
+
+message LedgerOperationBody {
+  string operation_id = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  int64 node_seq = 4;
+  string op_type = 5;
+  string payload_json = 6;
+  string created_at = 7;
+  string prev_hash_b64 = 8;
+}
+
+message LedgerOperationEnvelope {
+  LedgerOperationBody body = 1;
+  string body_hash_b64 = 2;
+  string signing_public_key_b64 = 3;
+  string signature_b64 = 4;
+  int64 position = 5;
+}
+
+message LedgerCheckpointBody {
+  string checkpoint_id = 1;
+  string cluster_id = 2;
+  int64 to_position = 3;
+  int64 operation_count = 4;
+  string merkle_root_b64 = 5;
+  string created_at = 6;
+}
+
+message LedgerCheckpoint {
+  LedgerCheckpointBody body = 1;
+  string body_hash_b64 = 2;
+  string signer_node_id = 3;
+  string signing_public_key_b64 = 4;
+  string signature_b64 = 5;
+}
+
+message LedgerCheckpointCosignatureBody {
+  string checkpoint_id = 1;
+  string checkpoint_body_hash_b64 = 2;
+  string signer_node_id = 3;
+  string signed_at = 4;
+}
+
+message LedgerCheckpointCosignature {
+  LedgerCheckpointCosignatureBody body = 1;
+  string signing_public_key_b64 = 2;
+  string signature_b64 = 3;
+}
+
+message PeerHelloRequest {
+  string cluster_id = 1;
+  string node_id = 2;
+  string public_key = 3;
+}
+
+message PeerHelloResponse {
+  bool accepted = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  int64 latest_position = 4;
+  string latest_body_hash_b64 = 5;
+}
+
+message PeerApproveReadRequest {
+  string cluster_id = 1;
+  string requester_node_id = 2;
+  string requester_public_key = 3;
+  string nonce = 4;
+  string secret_scope = 5;
+  string secret_name = 6;
+  string requester_actor = 7;
+  string token_id = 8;
+  string policy_decision = 9;
+  int64 requester_latest_position = 10;
+  string requester_latest_body_hash_b64 = 11;
+}
+
+message PeerApproveReadResponse {
+  bool accepted = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  int64 latest_position = 4;
+  string latest_body_hash_b64 = 5;
+  string statement_hash_b64 = 6;
+  string signing_public_key_b64 = 7;
+  string signature_b64 = 8;
+  string reason = 9;
+}
+
+message PeerApproveCollisionRequest {
+  string cluster_id = 1;
+  string requester_node_id = 2;
+  string requester_public_key = 3;
+  string nonce = 4;
+  string collision_id = 5;
+  string scope = 6;
+  string name = 7;
+  string key = 8;
+  string current_operation_id = 9;
+  string incoming_operation_id = 10;
+  int64 base_version_seq = 11;
+  int64 current_version_seq = 12;
+  string resolution = 13;
+  int64 requester_latest_position = 14;
+  string requester_latest_body_hash_b64 = 15;
+}
+
+message PeerApproveCollisionResponse {
+  bool accepted = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  int64 latest_position = 4;
+  string latest_body_hash_b64 = 5;
+  string statement_hash_b64 = 6;
+  string signing_public_key_b64 = 7;
+  string signature_b64 = 8;
+  string reason = 9;
+}
+
+message PeerRouteMasterApprovalRequest {
+  string cluster_id = 1;
+  string requester_node_id = 2;
+  string requester_public_key = 3;
+  ScopeSelector scope = 4;
+  string secret_name = 5;
+  string secret_version = 6;
+  string action = 7;
+  string requested_by = 8;
+  string reason = 9;
+  string default_reason = 10;
+}
+
+message PeerRouteMasterApprovalResponse {
+  bool accepted = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  ApprovalRequestInfo request = 4;
+  string reason = 5;
+}
+
+message PeerGetMasterApprovalStatusRequest {
+  string cluster_id = 1;
+  string requester_node_id = 2;
+  string requester_public_key = 3;
+  string request_id = 4;
+}
+
+message PeerGetMasterApprovalStatusResponse {
+  bool found = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  ApprovalRequestInfo request = 4;
+  string approval_receipt = 5;
+}
+
+message PeerConsumeMasterApprovalReceiptRequest {
+  string cluster_id = 1;
+  string requester_node_id = 2;
+  string requester_public_key = 3;
+  ScopeSelector scope = 4;
+  string secret_name = 5;
+  string secret_version = 6;
+  string action = 7;
+  string approval_receipt = 8;
+  string actor = 9;
+}
+
+message PeerConsumeMasterApprovalReceiptResponse {
+  bool consumed = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  string request_id = 4;
+}
+
+message PeerListOperationsRequest {
+  int64 after_position = 1;
+  uint32 limit = 2;
+  string peer_node_id = 3;
+  bool use_recorded_cursor = 4;
+}
+
+message PeerListOperationsResponse {
+  repeated LedgerOperationEnvelope operations = 1;
+  int64 latest_position = 2;
+  string latest_body_hash_b64 = 3;
+}
+
+message PeerPushOperationsRequest {
+  repeated LedgerOperationEnvelope operations = 1;
+}
+
+message PeerPushOperationsResponse {
+  uint32 accepted_count = 1;
+  int64 latest_position = 2;
+  string latest_body_hash_b64 = 3;
+}
+
+message PeerAckOperationsRequest {
+  string peer_node_id = 1;
+  int64 position = 2;
+  string body_hash_b64 = 3;
+}
+
+message PeerAckOperationsResponse {
+  bool recorded = 1;
+  int64 next_position = 2;
+}
+
+message PeerCosignCheckpointRequest {
+  string requester_node_id = 1;
+  string requester_public_key = 2;
+  LedgerCheckpoint checkpoint = 3;
+}
+
+message PeerCosignCheckpointResponse {
+  bool accepted = 1;
+  string cluster_id = 2;
+  string node_id = 3;
+  LedgerCheckpointCosignature cosignature = 4;
+  string reason = 5;
+}
+
+message InitHemRequest {
+  bool force = 1;
+}
+
+message InitHemResponse {
+  bool initialized = 1;
+  string operator_token = 2;
+}
+
+message RotateMasterKeyRequest {
+  string actor = 1;
+}
+
+message RotateMasterKeyResponse {
+  string new_key_id = 1;
+  uint32 rotated_secret_count = 2;
+}
+
+message ExportSecretsRequest {
+  ScopeSelector scope = 1;
+}
+
+message ExportSecretsResponse {
+  bytes encrypted_bundle = 1;
+}
+
+message ImportSecretsRequest {
+  bytes encrypted_bundle = 1;
+  bool merge = 2;
+  string actor = 3;
+}
+
+message ImportSecretsResponse {
+  uint32 imported_secret_count = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+  string version = 2;
+}
