@@ -18,7 +18,9 @@ use hem_core::{
     authorize_admin, authorize_read, envelope_decrypt_for_node,
     model::{resolution_chain, ApprovalState as CoreApprovalState},
     node_statement_hash_b64, peer_transport_auth_statement_bytes, verify_node_statement_signature,
-    AuditEntry as CoreAuditEntry, ClusterConfig, CollisionAgreementStatement, DeleteApprovalRecord,
+    AuditClientInfo as CoreAuditClientInfo, AuditEntry as CoreAuditEntry,
+    AuditTokenInfo as CoreAuditTokenInfo, AuditTransportInfo as CoreAuditTransportInfo,
+    ClusterConfig, CollisionAgreementStatement, DeleteApprovalRecord,
     DeleteApprovalStore, EnvelopeEncryptedValue, GrantInfo as CoreGrantInfo,
     GroupInfo as CoreGroupInfo, HemError, HemStore, LedgerCheckpoint as CoreLedgerCheckpoint,
     LedgerCheckpointBody as CoreLedgerCheckpointBody,
@@ -85,6 +87,14 @@ const DEFAULT_APPROVAL_WAIT_TIMEOUT_MS: u64 = 5 * 60 * 1_000;
 const APPROVAL_WAIT_POLL_INTERVAL_MS: u64 = 200;
 const AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const APPROVAL_RECEIPT_METADATA_KEY: &str = "x-hem-approval-receipt";
+const CLIENT_NAME_METADATA_KEY: &str = "x-hem-client-name";
+const CLIENT_VERSION_METADATA_KEY: &str = "x-hem-client-version";
+const CLIENT_PID_METADATA_KEY: &str = "x-hem-client-pid";
+const CLIENT_CONTEXT_METADATA_KEY: &str = "x-hem-client-context";
+const CLIENT_REQUEST_ID_METADATA_KEY: &str = "x-hem-request-id";
+const CALLER_FINGERPRINT_METADATA_KEY: &str = "x-hem-caller-fingerprint";
+const USER_AGENT_METADATA_KEY: &str = "user-agent";
+const CLIENT_METADATA_VALUE_MAX_LEN: usize = 256;
 const DEFAULT_GET_APPROVAL_REASON: &str = "read requires approval";
 const DEFAULT_SET_APPROVAL_REASON: &str = "write requires approval";
 const DEFAULT_SCAN_MIN_VALUE_LENGTH: u32 = 8;
@@ -557,6 +567,12 @@ impl HemRuntimeService {
             token_id,
             claims,
             is_operator,
+            client: parse_client_metadata(request.metadata()),
+            transport: Some(CoreAuditTransportInfo {
+                kind: Some("tcp".to_string()),
+                remote_addr: request.remote_addr().map(|addr| addr.to_string()),
+                user_agent: metadata_string(request.metadata(), USER_AGENT_METADATA_KEY),
+            }),
         })
     }
 
@@ -579,6 +595,20 @@ impl HemRuntimeService {
         result: &str,
         details: &str,
     ) {
+        self.audit_with_key(store, caller, action, secret, None, result, details);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn audit_with_key(
+        &self,
+        store: &HemStore,
+        caller: Option<&CallerPrincipal>,
+        action: &str,
+        secret: Option<(&SecretScope, &str)>,
+        key: Option<&str>,
+        result: &str,
+        details: &str,
+    ) {
         let audit_store = match store.audit_store() {
             Ok(value) => value,
             Err(err) => {
@@ -595,16 +625,34 @@ impl HemRuntimeService {
             Some(caller) => (caller.actor.clone(), caller.token_id.clone()),
             None => ("unknown".to_string(), String::new()),
         };
+        let token = caller.map(|caller| CoreAuditTokenInfo {
+            token_type: caller.claims.token_type.clone(),
+            service_name: caller.claims.service_name.clone(),
+            identity_id: caller.claims.identity_id.clone(),
+            project: caller.claims.project.clone(),
+            issued_by: caller.claims.issued_by.clone(),
+            issued_at: caller.claims.issued_at,
+            expires_at: caller.claims.expires_at,
+        });
+        let client = caller.and_then(|caller| caller.client.clone());
+        let transport = caller.and_then(|caller| caller.transport.clone());
+        let warnings = audit_warnings(action, caller);
         let entry = CoreAuditEntry {
+            schema_version: hem_core::AUDIT_SCHEMA_VERSION,
             audit_id: valhall_config::ids::generate_prefixed_entropy_id("aud"),
             ts: Utc::now(),
             action: action.to_string(),
             actor,
             token_id,
+            token,
+            client,
+            transport,
             secret_scope,
             secret_name,
+            key: key.map(str::to_string),
             result: result.to_string(),
             details: details.to_string(),
+            warnings,
         };
 
         if let Err(err) = audit_store.append(&entry) {
@@ -1810,6 +1858,8 @@ struct CallerPrincipal {
     token_id: String,
     claims: TokenClaims,
     is_operator: bool,
+    client: Option<CoreAuditClientInfo>,
+    transport: Option<CoreAuditTransportInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -2454,7 +2504,8 @@ impl HemRuntime for HemRuntimeService {
             }
         }
 
-        if let Some(key) = normalize_optional_string(req.key) {
+        let requested_key = normalize_optional_string(req.key);
+        if let Some(key) = requested_key.clone() {
             let value =
                 secret.values.get(key.as_str()).cloned().ok_or_else(|| {
                     Status::not_found(format!("secret value key not found: {key}"))
@@ -2474,11 +2525,12 @@ impl HemRuntime for HemRuntimeService {
         )
         .await?;
 
-        self.audit(
+        self.audit_with_key(
             &store,
             Some(&caller),
             "get_secret",
             Some((&secret.info.scope, secret.info.name.as_str())),
+            requested_key.as_deref(),
             "ok",
             "",
         );
@@ -4617,6 +4669,92 @@ fn parse_authorization_header(metadata: &tonic::metadata::MetadataMap) -> Result
         ));
     }
     Ok(token.to_string())
+}
+
+fn sanitize_metadata_value(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(CLIENT_METADATA_VALUE_MAX_LEN)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn metadata_string(metadata: &tonic::metadata::MetadataMap, key: &str) -> Option<String> {
+    let value = metadata.get(key)?.to_str().ok()?;
+    let sanitized = sanitize_metadata_value(value);
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
+fn parse_client_metadata(metadata: &tonic::metadata::MetadataMap) -> Option<CoreAuditClientInfo> {
+    let mut client = CoreAuditClientInfo {
+        name: metadata_string(metadata, CLIENT_NAME_METADATA_KEY),
+        version: metadata_string(metadata, CLIENT_VERSION_METADATA_KEY),
+        pid: metadata_string(metadata, CLIENT_PID_METADATA_KEY)
+            .and_then(|value| value.parse().ok()),
+        context: metadata_string(metadata, CLIENT_CONTEXT_METADATA_KEY),
+        request_id: metadata_string(metadata, CLIENT_REQUEST_ID_METADATA_KEY),
+        ..CoreAuditClientInfo::default()
+    };
+    // Fingerprint format (all parts optional):
+    //   classification=agent:claude-code;markers=ancestor:claude,env:CLAUDECODE;tty=false;session=<id>
+    if let Some(fingerprint) = metadata_string(metadata, CALLER_FINGERPRINT_METADATA_KEY) {
+        for part in fingerprint.split(';') {
+            let Some((field, value)) = part.split_once('=') else {
+                continue;
+            };
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            match field.trim() {
+                "classification" => client.classification = Some(value.to_string()),
+                "markers" => {
+                    client.markers = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|marker| !marker.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                }
+                "tty" => client.tty = value.parse().ok(),
+                "session" => client.agent_session = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+    if client == CoreAuditClientInfo::default() {
+        return None;
+    }
+    client.reported = true;
+    Some(client)
+}
+
+fn audit_warnings(action: &str, caller: Option<&CallerPrincipal>) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if action != "get_secret" {
+        return warnings;
+    }
+    let Some(caller) = caller else {
+        return warnings;
+    };
+    if caller.is_operator {
+        warnings.push("operator_token_read".to_string());
+        let agent_classified = caller
+            .client
+            .as_ref()
+            .and_then(|client| client.classification.as_deref())
+            .is_some_and(|classification| classification.starts_with("agent:"));
+        if agent_classified {
+            warnings.push("unattributed_agent_read".to_string());
+        }
+    }
+    warnings
 }
 
 fn parse_optional_metadata_receipt(

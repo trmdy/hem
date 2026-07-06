@@ -188,36 +188,57 @@ mod tests {
 
     use super::*;
 
+    fn test_entry(
+        audit_id: &str,
+        ts: chrono::DateTime<Utc>,
+        action: &str,
+        token_id: &str,
+        secret_scope: Option<SecretScope>,
+        secret_name: &str,
+    ) -> AuditEntry {
+        AuditEntry {
+            schema_version: crate::AUDIT_SCHEMA_VERSION,
+            audit_id: audit_id.to_string(),
+            ts,
+            action: action.to_string(),
+            actor: format!("token:{token_id}"),
+            token_id: token_id.to_string(),
+            token: None,
+            client: None,
+            transport: None,
+            secret_scope,
+            secret_name: secret_name.to_string(),
+            key: None,
+            result: "ok".to_string(),
+            details: String::new(),
+            warnings: Vec::new(),
+        }
+    }
+
     #[test]
     fn append_and_filter_audit_entries() {
         let root = tempfile::tempdir().expect("tempdir");
         let store = AuditStore::open(root.path()).expect("open");
         let now = Utc::now();
 
-        let a = AuditEntry {
-            audit_id: "a".to_string(),
-            ts: now - Duration::minutes(2),
-            action: "get_secret".to_string(),
-            actor: "token:a".to_string(),
-            token_id: "a".to_string(),
-            secret_scope: Some(SecretScope::Global),
-            secret_name: "openai-prod".to_string(),
-            result: "ok".to_string(),
-            details: String::new(),
-        };
-        let b = AuditEntry {
-            audit_id: "b".to_string(),
-            ts: now - Duration::minutes(1),
-            action: "set_secret".to_string(),
-            actor: "token:b".to_string(),
-            token_id: "b".to_string(),
-            secret_scope: Some(SecretScope::Project {
+        let a = test_entry(
+            "a",
+            now - Duration::minutes(2),
+            "get_secret",
+            "a",
+            Some(SecretScope::Global),
+            "openai-prod",
+        );
+        let b = test_entry(
+            "b",
+            now - Duration::minutes(1),
+            "set_secret",
+            "b",
+            Some(SecretScope::Project {
                 project: "proj-1".to_string(),
             }),
-            secret_name: "cfg".to_string(),
-            result: "ok".to_string(),
-            details: String::new(),
-        };
+            "cfg",
+        );
 
         store.append(&a).expect("append a");
         store.append(&b).expect("append b");
@@ -242,34 +263,41 @@ mod tests {
         let now = Utc::now();
 
         store
-            .append(&AuditEntry {
-                audit_id: "old".to_string(),
-                ts: now - Duration::days(120),
-                action: "set_secret".to_string(),
-                actor: "token:old".to_string(),
-                token_id: "old".to_string(),
-                secret_scope: Some(SecretScope::Global),
-                secret_name: "old-secret".to_string(),
-                result: "ok".to_string(),
-                details: String::new(),
-            })
+            .append(&test_entry(
+                "old",
+                now - Duration::days(120),
+                "set_secret",
+                "old",
+                Some(SecretScope::Global),
+                "old-secret",
+            ))
             .expect("append old");
         store
-            .append(&AuditEntry {
-                audit_id: "new".to_string(),
-                ts: now - Duration::minutes(1),
-                action: "set_secret".to_string(),
-                actor: "token:new".to_string(),
-                token_id: "new".to_string(),
-                secret_scope: Some(SecretScope::Global),
-                secret_name: "new-secret".to_string(),
-                result: "ok".to_string(),
-                details: String::new(),
-            })
+            .append(&test_entry(
+                "new",
+                now - Duration::minutes(1),
+                "set_secret",
+                "new",
+                Some(SecretScope::Global),
+                "new-secret",
+            ))
             .expect("append new");
 
         let listed = store.list(None, None, None, 10).expect("list");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].audit_id, "new");
+    }
+
+    #[test]
+    fn v1_entries_without_attribution_fields_still_parse() {
+        let line = r#"{"audit_id":"aud_legacy","ts":"2026-06-01T10:00:00Z","action":"get_secret","actor":"token:tok_x","token_id":"tok_x","secret_scope":{"type":"global"},"secret_name":"ahrefs","result":"ok","details":""}"#;
+        let entry: AuditEntry = serde_json::from_str(line).expect("parse v1 entry");
+        assert_eq!(entry.schema_version, 1);
+        assert_eq!(entry.audit_id, "aud_legacy");
+        assert!(entry.token.is_none());
+        assert!(entry.client.is_none());
+        assert!(entry.transport.is_none());
+        assert!(entry.key.is_none());
+        assert!(entry.warnings.is_empty());
     }
 }

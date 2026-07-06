@@ -2530,15 +2530,25 @@ fn append_cluster_security_audit(data_dir: &Path, issue_count: usize) {
         }
     };
     let entry = CoreAuditEntry {
+        schema_version: hem_core::AUDIT_SCHEMA_VERSION,
         audit_id: valhall_config::ids::generate_prefixed_entropy_id("aud"),
         ts: Utc::now(),
         action: "cluster.verify.security".to_string(),
         actor: "hem-cli".to_string(),
         token_id: String::new(),
+        token: None,
+        client: Some(hem_core::AuditClientInfo {
+            reported: false,
+            name: Some("hem-cli".to_string()),
+            ..hem_core::AuditClientInfo::default()
+        }),
+        transport: None,
         secret_scope: None,
         secret_name: String::new(),
+        key: None,
         result: "unsafe_permissions".to_string(),
         details: format!("issues={issue_count}"),
+        warnings: Vec::new(),
     };
     if let Err(err) = audit_store.append(&entry) {
         eprintln!("warning: failed to append cluster verify security audit entry: {err}");

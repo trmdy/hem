@@ -182,17 +182,96 @@ pub struct ApprovalRequest {
     pub resolve_message: String,
 }
 
+/// Version written by current producers. Entries without a `schema_version`
+/// field deserialize as version 1.
+pub const AUDIT_SCHEMA_VERSION: u32 = 2;
+
+fn audit_schema_version_v1() -> u32 {
+    1
+}
+
+/// Attribution derived from the verified bearer token (cryptographic tier).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditTokenInfo {
+    #[serde(rename = "type")]
+    pub token_type: TokenType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub issued_by: String,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Attribution reported by the client (self-reported tier — advisory, not proof).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditClientInfo {
+    /// True when any of this info came from client-supplied metadata rather
+    /// than being observed by the writer.
+    #[serde(default)]
+    pub reported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Caller classification computed by the client, e.g. "human",
+    /// "agent:claude-code", "unknown".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<String>,
+    /// Evidence behind the classification, e.g. "ancestor:claude",
+    /// "env:CLAUDECODE". Marker names only, never values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tty: Option<bool>,
+}
+
+/// Connection-level facts observed by the daemon (kernel-verified for UDS,
+/// weak for loopback TCP).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditTransportInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_addr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditEntry {
+    #[serde(default = "audit_schema_version_v1")]
+    pub schema_version: u32,
     pub audit_id: String,
     pub ts: DateTime<Utc>,
     pub action: String,
     pub actor: String,
     pub token_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<AuditTokenInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<AuditClientInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<AuditTransportInfo>,
     pub secret_scope: Option<SecretScope>,
     pub secret_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     pub result: String,
     pub details: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

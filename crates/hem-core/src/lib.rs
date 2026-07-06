@@ -38,8 +38,9 @@ pub use ledger::{
     LedgerPeerCursor, LedgerSecretMetadata, LedgerSecretValueVersion, LedgerStore,
 };
 pub use model::{
-    AuditEntry, GrantInfo, GroupInfo, ScopeResolutionContext, SecretInfo, SecretScope,
-    SecretWithValues, SetSecretInput, TokenClaims, TokenType,
+    AuditClientInfo, AuditEntry, AuditTokenInfo, AuditTransportInfo, GrantInfo, GroupInfo,
+    ScopeResolutionContext, SecretInfo, SecretScope, SecretWithValues, SetSecretInput, TokenClaims,
+    TokenType, AUDIT_SCHEMA_VERSION,
 };
 pub use policy::{
     IssueOfflineLeaseInput, OfflineLease, PolicyBinding, PolicySnapshot, PolicyStore,
