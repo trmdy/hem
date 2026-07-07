@@ -14,7 +14,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "lint": "eslint src tests",
     "test": "vitest run --project unit",
-    "test:integration": "vitest run --project integration"
+    "test:integration": "vitest run --project integration",
+    "package": "electron-vite build && electron-builder --mac",
+    "install:app": "npm run package && rm -rf \"/Applications/Hem Desk.app\" && ditto \"release/mac-arm64/Hem Desk.app\" \"/Applications/Hem Desk.app\""
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
@@ -38,6 +40,7 @@
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.1.0",
     "electron": "^43.0.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "eslint": "^9.39.0",
     "puppeteer-core": "^25.3.0",
