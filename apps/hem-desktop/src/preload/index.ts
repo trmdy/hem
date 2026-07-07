@@ -38,6 +38,7 @@ const INVOKE_CHANNELS = new Set([
 
 const EVENT_CHANNELS = new Set([
   'hem:approval',
+  'hem:audit-changed',
   'hem:secret-changed',
   'hem:token-changed',
   'hem:nats-status',

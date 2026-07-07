@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import type { MaskedKey, SecretRow } from '../../shared/types';
 import { errorText, invoke, useSecretDetail, useVaultList, useVersionHistory } from '../lib/api';
 import { dateShort, relTime } from '../lib/fmt';
+import { fuzzyMatch } from '../lib/fuzzy';
 import { useKeys } from '../lib/keys';
 import { Button, Dot, Kbd, SectionLabel } from '../components/ui';
 import { colors, fonts, shadows } from '../theme/tokens.stylex';
@@ -17,20 +18,6 @@ export function primaryKey(keys: MaskedKey[]): string | null {
     if (hit) return hit.key;
   }
   return keys[0].key;
-}
-
-/** Substring first, then subsequence — cheap fuzzy in the palette's spirit. */
-export function fuzzyMatch(query: string, text: string): boolean {
-  const q = query.toLowerCase();
-  const t = text.toLowerCase();
-  if (!q) return true;
-  if (t.includes(q)) return true;
-  let i = 0;
-  for (const ch of t) {
-    if (ch === q[i]) i += 1;
-    if (i === q.length) return true;
-  }
-  return false;
 }
 
 const s = stylex.create({

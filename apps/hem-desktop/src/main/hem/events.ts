@@ -49,6 +49,8 @@ export function startNatsBridge(forward: EventForwarder): { stop: () => Promise<
             forward('hem:approval', {
               kind: subject.endsWith('.requested') ? 'requested' : 'resolved',
             });
+          } else if (subject === 'hem.secret.read') {
+            forward('hem:audit-changed', {});
           } else if (subject.startsWith('hem.secret.')) {
             forward('hem:secret-changed', {});
           } else if (subject.startsWith('hem.token.')) {

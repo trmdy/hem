@@ -139,6 +139,9 @@ export function useHemEvents() {
         void queryClient.invalidateQueries({ queryKey: ['approvals:list'] });
         void queryClient.invalidateQueries({ queryKey: ['audit:query'] });
       }),
+      window.hem.on('hem:audit-changed', () => {
+        void queryClient.invalidateQueries({ queryKey: ['audit:query'] });
+      }),
       window.hem.on('hem:secret-changed', () => {
         void queryClient.invalidateQueries({ queryKey: ['vault:list'] });
         void queryClient.invalidateQueries({ queryKey: ['vault:get'] });

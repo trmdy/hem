@@ -283,6 +283,7 @@ export type IpcResult<C extends IpcChannel> = IpcContract[C][1];
 /** Events pushed main → renderer. */
 export interface HemEventMap {
   'hem:approval': { kind: 'requested' | 'resolved'; requestId?: string };
+  'hem:audit-changed': Record<string, never>;
   'hem:secret-changed': { ref?: string };
   'hem:token-changed': Record<string, never>;
   'hem:nats-status': { connected: boolean };

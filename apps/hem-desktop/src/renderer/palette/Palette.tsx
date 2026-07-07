@@ -3,7 +3,7 @@ import { Dialog } from '@base-ui/react/dialog';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SecretRow } from '../../shared/types';
 import { useVaultList } from '../lib/api';
-import { fuzzyMatch } from '../views/VaultView';
+import { rankBy } from '../lib/fuzzy';
 import type { ViewId } from '../components/AppShell';
 import { Kbd } from '../components/ui';
 import { colors, fonts, shadows } from '../theme/tokens.stylex';
@@ -132,14 +132,20 @@ export function Palette({
   }, [open]);
 
   const results = useMemo<Result[]>(() => {
-    const secrets: Result[] = (vault.data ?? [])
-      .filter((r) => fuzzyMatch(query, `${r.section}/${r.name} ${r.description} ${r.group}`))
-      .slice(0, query ? 6 : 5)
-      .map((row) => ({ kind: 'secret', row }));
-    const acts: Result[] = actions
-      .filter((a) => fuzzyMatch(query, a.label))
+    // Ranked, not just filtered: name matches outrank ref matches, which
+    // outrank description/group matches; within a field, consecutive and
+    // word-boundary matches win (lib/fuzzy).
+    const secrets: Result[] = rankBy(vault.data ?? [], query, (r) => [
+      [r.name, 1],
+      [`${r.section}/${r.name}`, 0.9],
+      [r.description, 0.5],
+      [r.group, 0.5],
+    ])
+      .slice(0, query ? 8 : 5)
+      .map(({ item }) => ({ kind: 'secret', row: item }));
+    const acts: Result[] = rankBy(actions, query, (a) => [[a.label, 1]])
       .slice(0, query ? 6 : 4)
-      .map((action) => ({ kind: 'action', action }));
+      .map(({ item }) => ({ kind: 'action', action: item }));
     return [...secrets, ...acts];
   }, [vault.data, query, actions]);
 

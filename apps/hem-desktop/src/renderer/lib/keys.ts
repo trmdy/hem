@@ -16,15 +16,20 @@ export interface KeySpec {
   inInputs?: boolean;
 }
 
-function matches(e: KeyboardEvent, combo: string): boolean {
+export function matches(e: KeyboardEvent, combo: string): boolean {
   const parts = combo.toLowerCase().split('+');
   const key = parts[parts.length - 1];
   const needMod = parts.includes('mod');
   const needShift = parts.includes('shift');
   const needAlt = parts.includes('alt');
+  // Punctuation keys may require Shift (or AltGr) depending on the keyboard
+  // layout — e.g. "/" is Shift+7 on Norwegian. e.key already encodes the
+  // produced character, so for those keys the physical modifiers must not
+  // veto the match (unless the combo asks for shift explicitly).
+  const layoutShifted = key.length === 1 && !/[a-z0-9]/.test(key);
   if (needMod !== (e.metaKey || e.ctrlKey)) return false;
-  if (needShift !== e.shiftKey) return false;
-  if (needAlt !== e.altKey) return false;
+  if (layoutShifted ? needShift && !e.shiftKey : needShift !== e.shiftKey) return false;
+  if (!layoutShifted && needAlt !== e.altKey) return false;
   const eventKey = e.key.toLowerCase();
   if (key === 'enter') return eventKey === 'enter';
   if (key === 'escape') return eventKey === 'escape';

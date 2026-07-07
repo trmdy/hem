@@ -5,7 +5,7 @@ import { errorText, invoke } from '../lib/api';
 import { useQuery } from '@tanstack/react-query';
 import { timeOrDate } from '../lib/fmt';
 import { useKeys } from '../lib/keys';
-import { fuzzyMatch } from './VaultView';
+import { fuzzyMatch } from '../lib/fuzzy';
 import { Button, Kbd } from '../components/ui';
 import { colors, fonts, shadows } from '../theme/tokens.stylex';
 

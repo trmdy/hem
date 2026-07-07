@@ -17,5 +17,5 @@
     "useDefineForClassFields": true,
     "noEmit": true
   },
-  "include": ["src/renderer/**/*", "src/preload/api.d.ts", "src/shared/**/*"]
+  "include": ["src/renderer/**/*", "src/preload/api.d.ts", "src/shared/**/*", "tests/renderer/**/*"]
 }
