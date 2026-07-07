@@ -46,9 +46,17 @@ use proto::{
     SecretRef, SecretScope, SecretValue, SetSecretRequest,
 };
 
+mod fingerprint;
+
 const SECRET_REF_FORMATS: &str =
     "<name> (global), global/<name>, project/<project>/<name>, identity/<identity_id>/<name>";
 const AUTHORIZATION_METADATA_KEY: &str = "authorization";
+const CLIENT_NAME_METADATA_KEY: &str = "x-hem-client-name";
+const CLIENT_VERSION_METADATA_KEY: &str = "x-hem-client-version";
+const CLIENT_PID_METADATA_KEY: &str = "x-hem-client-pid";
+const CLIENT_CONTEXT_METADATA_KEY: &str = "x-hem-client-context";
+const CLIENT_REQUEST_ID_METADATA_KEY: &str = "x-hem-request-id";
+const CALLER_FINGERPRINT_METADATA_KEY: &str = "x-hem-caller-fingerprint";
 const DEFAULT_HEM_SUBDIR: &str = ".valhall/hem";
 const DEFAULT_HEM_SYSTEM_DAEMONS_SUBDIR: &str = ".valhall/system-daemons/data/hem";
 const DEFAULT_HEMD_BIND: &str = "127.0.0.1:50091";
@@ -403,6 +411,23 @@ enum Commands {
     },
     #[command(visible_alias = "u")]
     Usage,
+    #[command(about = "Client-side diagnostics")]
+    Doctor {
+        #[command(subcommand)]
+        command: DoctorCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DoctorCommands {
+    #[command(
+        about = "Show how this invocation context is classified for audit attribution",
+        after_help = "Prints the caller fingerprint the CLI sends to hemd (docs/1022):\nclassification (human | agent:<name> | unknown), detection markers,\nprocess ancestry, TTY status, and the exact metadata header value.\n\nRun inside an agent harness (Claude Code, Codex, Cursor, ...) to calibrate\ndetection, or interactively to confirm your own use classifies as human."
+    )]
+    Agent {
+        #[arg(long, help = "Emit JSON")]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -739,6 +764,9 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
     }
     if let Commands::Lease { command } = cli.command {
         return run_lease_command(command);
+    }
+    if let Commands::Doctor { command } = cli.command {
+        return run_doctor_command(command);
     }
 
     let endpoint = daemon_endpoint(cli.endpoint);
@@ -1440,7 +1468,8 @@ async fn run(cli: Cli) -> Result<i32, Box<dyn std::error::Error>> {
         | Commands::Usage
         | Commands::Cluster { .. }
         | Commands::Policy { .. }
-        | Commands::Lease { .. } => {
+        | Commands::Lease { .. }
+        | Commands::Doctor { .. } => {
             unreachable!("local command is handled before daemon connect")
         }
     }
@@ -3419,6 +3448,48 @@ fn run_policy_command(command: PolicyCommands) -> Result<i32, Box<dyn std::error
     Ok(0)
 }
 
+fn run_doctor_command(command: DoctorCommands) -> Result<i32, Box<dyn std::error::Error>> {
+    match command {
+        DoctorCommands::Agent { json } => {
+            let fp = fingerprint::collect();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&fp)?);
+                return Ok(0);
+            }
+            print_kv("classification", fp.classification.as_str());
+            print_kv("tty", fp.tty);
+            print_kv(
+                "markers",
+                if fp.markers.is_empty() {
+                    "-".to_string()
+                } else {
+                    fp.markers.join(", ")
+                },
+            );
+            print_kv(
+                "ancestors",
+                if fp.ancestors.is_empty() {
+                    "-".to_string()
+                } else {
+                    fp.ancestors.join(" -> ")
+                },
+            );
+            print_kv("session", fp.session.as_deref().unwrap_or("-"));
+            print_kv("hem_caller", fp.context.as_deref().unwrap_or("-"));
+            print_kv("allow_unattributed", fp.allow_unattributed);
+            print_kv("fingerprint_header", fp.header_value());
+            if fp.tty && fp.context.is_some() {
+                eprintln!(
+                    "warning: {} is set in what looks like an interactive session; \
+                     set it in agent wrappers only, never in shell profiles",
+                    fingerprint::HEM_CALLER_ENV
+                );
+            }
+            Ok(0)
+        }
+    }
+}
+
 fn run_lease_command(command: LeaseCommands) -> Result<i32, Box<dyn std::error::Error>> {
     let data_dir = resolve_primary_data_dir();
     let store = PolicyStore::open(data_dir.as_path())?;
@@ -3789,6 +3860,7 @@ fn operator_token_dirs() -> Vec<PathBuf> {
 #[derive(Clone, Debug)]
 struct BearerAuthInterceptor {
     value: Option<MetadataValue<tonic::metadata::Ascii>>,
+    client_headers: Vec<(&'static str, MetadataValue<tonic::metadata::Ascii>)>,
 }
 
 impl BearerAuthInterceptor {
@@ -3800,8 +3872,37 @@ impl BearerAuthInterceptor {
             }
             None => None,
         };
-        Ok(Self { value })
+        Ok(Self {
+            value,
+            client_headers: client_identity_headers(),
+        })
     }
+}
+
+/// Precompute the x-hem-client-* / x-hem-caller-fingerprint metadata once per
+/// CLI run. Best-effort: values that fail ascii conversion are dropped.
+fn client_identity_headers() -> Vec<(&'static str, MetadataValue<tonic::metadata::Ascii>)> {
+    let fp = fingerprint::collect();
+    let mut headers: Vec<(&'static str, String)> = vec![
+        (CLIENT_NAME_METADATA_KEY, "hem-cli".to_string()),
+        (
+            CLIENT_VERSION_METADATA_KEY,
+            env!("CARGO_PKG_VERSION").to_string(),
+        ),
+        (CLIENT_PID_METADATA_KEY, std::process::id().to_string()),
+        (CALLER_FINGERPRINT_METADATA_KEY, fp.header_value()),
+    ];
+    if let Some(context) = fp.context.as_deref() {
+        headers.push((CLIENT_CONTEXT_METADATA_KEY, context.to_string()));
+    }
+    headers
+        .into_iter()
+        .filter_map(|(key, value)| {
+            MetadataValue::try_from(value.as_str())
+                .ok()
+                .map(|value| (key, value))
+        })
+        .collect()
 }
 
 impl Interceptor for BearerAuthInterceptor {
@@ -3810,6 +3911,15 @@ impl Interceptor for BearerAuthInterceptor {
             request
                 .metadata_mut()
                 .insert(AUTHORIZATION_METADATA_KEY, value.clone());
+        }
+        for (key, value) in &self.client_headers {
+            request.metadata_mut().insert(*key, value.clone());
+        }
+        let request_id = valhall_config::ids::generate_prefixed_entropy_id("req");
+        if let Ok(value) = MetadataValue::try_from(request_id.as_str()) {
+            request
+                .metadata_mut()
+                .insert(CLIENT_REQUEST_ID_METADATA_KEY, value);
         }
         Ok(request)
     }
