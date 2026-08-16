@@ -12,7 +12,9 @@ the keyboard or opening a terminal.
 - **Pending Approvals** — approve/deny from Raycast (no TTY dance)
 - **Audit Log** — recent vault activity
 - **Scan Clipboard** — leak-check clipboard contents before pasting somewhere public
-- **Menu bar** — cluster health dot + pending approval count, always visible
+
+The extension has no background command. Expensive cluster-health verification
+runs only when **Cluster Status** is opened explicitly.
 
 See [docs/0001-extension-spec.md](docs/0001-extension-spec.md) for the spec and
 [docs/0002-implementation-report.md](docs/0002-implementation-report.md) for
@@ -31,7 +33,7 @@ implementation status, judgment calls, and known issues.
 1. `cd` into this repo and run `npm install`.
 2. Run `npm run dev`. This starts `ray develop`, which builds the extension
    and imports it into your local Raycast under **Development** — Raycast
-   opens automatically and the seven commands become searchable immediately.
+   opens automatically and the six commands become searchable immediately.
 3. Once you see the commands, you can stop the dev server (Ctrl-C); the
    extension stays imported. Re-run `npm run dev` after code changes.
 4. Alternatively: open Raycast → search "Import Extension" → select this

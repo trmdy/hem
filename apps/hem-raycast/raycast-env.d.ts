@@ -36,8 +36,6 @@ declare namespace Preferences {
   export type AuditLog = ExtensionPreferences & {}
   /** Preferences accessible in the `scan-clipboard` command */
   export type ScanClipboard = ExtensionPreferences & {}
-  /** Preferences accessible in the `menu-bar` command */
-  export type MenuBar = ExtensionPreferences & {}
 }
 
 declare namespace Arguments {
@@ -53,7 +51,5 @@ declare namespace Arguments {
   export type AuditLog = {}
   /** Arguments passed to the `scan-clipboard` command */
   export type ScanClipboard = {}
-  /** Arguments passed to the `menu-bar` command */
-  export type MenuBar = {}
 }
 

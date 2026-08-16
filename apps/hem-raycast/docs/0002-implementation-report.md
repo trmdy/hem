@@ -101,9 +101,11 @@ mapping → audit entries. Teardown kills the daemon and removes the tmpdir.
    or disk; only its hash leaves the process.
 7. **Dynamic form rows**: Raycast forms can't add rows inline, so Add/Remove
    Row are ActionPanel actions (⌘⇧A / ⌘⇧⌫).
-8. **Menu-bar refresh policy** per spec §4.7: Health RPC every tick; cluster
-   CLI + approvals only on user-initiated open or when the cached state is
-   non-ok; state cached in Raycast `Cache` (metadata only).
+8. **Menu-bar command disabled.** The original spec's five-minute background
+   command is no longer registered. A non-ok peer made the full-ledger
+   `hem cluster health` probe eligible on every tick, which contributed to a
+   recurring filesystem-event and CPU storm. Cluster health is now strictly
+   user-initiated through Cluster Status.
 9. **KeyPicker paste variant**: when Paste-into-frontmost falls through to the
    key picker, the picker's primary action is Paste instead of Copy.
 
@@ -139,12 +141,15 @@ mapping → audit entries. Teardown kills the daemon and removes the tmpdir.
   is older than 5 minutes (staleness guard — previously it reran on every
   popover open while the cluster was non-ok, which is this cluster's steady
   state).
+- **2026-08-16 · Background health storm.** System diagnostics correlated the
+  five-minute Raycast menu-bar probe with repeated high-CPU/full-ledger Hem
+  scans and runaway `fseventsd` pressure. The menu-bar command was removed
+  from the manifest. Add Secret and every user-invoked command remain
+  available; no Hem CLI process is now launched in the background.
 
 ## Known issues / notes
 
 - `ray lint` (full) fails only on the unregistered `author` (see deviation 2).
-- The menu-bar pending badge can be stale by design (spec's refresh policy) —
-  up to one 5-min tick while everything is ok.
 - Audit-log `result` coloring assumes `ok`/`success` = green; other strings
   render red. Adjust if hemd emits different vocabulary.
 - Real-vault exposure during development was read-only and within the allowed

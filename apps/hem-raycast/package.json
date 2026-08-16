@@ -45,13 +45,6 @@
       "title": "Scan Clipboard for Secrets",
       "description": "Check clipboard contents for known secret values before pasting.",
       "mode": "no-view"
-    },
-    {
-      "name": "menu-bar",
-      "title": "Hem Menu Bar",
-      "description": "Cluster health dot and pending-approval count, always visible.",
-      "mode": "menu-bar",
-      "interval": "5m"
     }
   ],
   "preferences": [
