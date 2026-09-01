@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -415,6 +415,17 @@ impl LedgerStore {
     pub fn verify_integrity(&self) -> Result<LedgerIntegrityReport> {
         let latest_position = self.latest_position()?;
         let latest_body_hash_b64 = self.latest_body_hash()?.unwrap_or_default();
+        let checkpoints = self.list_checkpoints()?;
+        let checkpoint_positions = checkpoints
+            .iter()
+            .filter_map(|checkpoint| {
+                (checkpoint.body.to_position > 0 && checkpoint.body.to_position <= latest_position)
+                    .then_some(checkpoint.body.to_position)
+            })
+            .collect::<BTreeSet<_>>();
+        let mut checkpoint_positions = checkpoint_positions.into_iter().peekable();
+        let mut checkpoint_summaries = BTreeMap::new();
+        let mut merkle = MerkleAccumulator::default();
         let mut report = LedgerIntegrityReport {
             ok: true,
             latest_position,
@@ -431,6 +442,13 @@ impl LedgerStore {
 
         let mut expected_prev_hash = String::new();
         for operation in self.list_after(0, usize::MAX)? {
+            while checkpoint_positions
+                .peek()
+                .is_some_and(|position| *position < operation.position)
+            {
+                let position = checkpoint_positions.next().expect("peeked position");
+                checkpoint_summaries.insert(position, merkle.summary());
+            }
             report.operations_checked += 1;
             if operation.prev_hash_b64 != expected_prev_hash {
                 report.issues.push(integrity_issue(
@@ -470,10 +488,24 @@ impl LedgerStore {
             }
             inspect_known_operation_payload(&operation, &mut report.issues);
             report.value_blobs_checked += inspect_value_blobs(&operation, &mut report.issues);
+            merkle.push(decode_base64_exact::<32>(
+                "body_hash_b64",
+                operation.body_hash_b64.as_str(),
+            )?);
+            while checkpoint_positions
+                .peek()
+                .is_some_and(|position| *position == operation.position)
+            {
+                let position = checkpoint_positions.next().expect("peeked position");
+                checkpoint_summaries.insert(position, merkle.summary());
+            }
             expected_prev_hash = operation.body_hash_b64;
         }
+        for position in checkpoint_positions {
+            checkpoint_summaries.insert(position, merkle.summary());
+        }
 
-        for checkpoint in self.list_checkpoints()? {
+        for checkpoint in checkpoints {
             report.checkpoints_checked += 1;
             if let Err(err) = checkpoint.verify() {
                 report.issues.push(integrity_issue(
@@ -494,7 +526,11 @@ impl LedgerStore {
                     ),
                 ));
             } else if checkpoint.body.to_position > 0 {
-                self.verify_checkpoint_merkle(&checkpoint, &mut report)?;
+                verify_checkpoint_merkle_summary(
+                    &checkpoint,
+                    checkpoint_summaries.get(&checkpoint.body.to_position),
+                    &mut report,
+                );
             }
 
             for cosignature in
@@ -601,14 +637,11 @@ impl LedgerStore {
             accepted_operations += 1;
         }
 
+        // append_signed verifies every imported envelope, including its signature and
+        // link to the current local head. Re-verifying the complete historical ledger
+        // here made every peer batch proportional to all operations and checkpoints.
+        // Full historical verification remains available through verify_integrity().
         let materialized_records = self.repair_materializers()?;
-        let integrity = self.verify_integrity()?;
-        if !integrity.ok {
-            return Err(HemError::InvalidArgument(format!(
-                "bootstrap imported ledger failed integrity verification with {} issue(s)",
-                integrity.issues.len()
-            )));
-        }
 
         Ok(LedgerBootstrapReport {
             accepted_operations,
@@ -691,6 +724,28 @@ impl LedgerStore {
         let rows = stmt.query_map([], checkpoint_from_row)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(HemError::from)
+    }
+
+    pub fn latest_checkpoint_for_signer(
+        &self,
+        cluster_id: &str,
+        signer_node_id: &str,
+    ) -> Result<Option<LedgerCheckpoint>> {
+        validate_non_empty("cluster_id", cluster_id)?;
+        validate_non_empty("signer_node_id", signer_node_id)?;
+        let conn = self.connect()?;
+        conn.query_row(
+            "SELECT checkpoint_id, cluster_id, to_position, operation_count, merkle_root_b64, created_at,
+                    body_hash_b64, signer_node_id, signing_public_key_b64, signature_b64
+             FROM ledger_checkpoints
+             WHERE cluster_id = ?1 AND signer_node_id = ?2
+             ORDER BY to_position DESC, created_at DESC
+             LIMIT 1",
+            params![cluster_id, signer_node_id],
+            checkpoint_from_row,
+        )
+        .optional()
+        .map_err(HemError::from)
     }
 
     pub fn cosign_checkpoint(
@@ -1551,43 +1606,6 @@ impl LedgerStore {
                 "checkpoint merkle root mismatch expected={} actual={}",
                 checkpoint.body.merkle_root_b64, merkle_root_b64
             )));
-        }
-        Ok(())
-    }
-
-    fn verify_checkpoint_merkle(
-        &self,
-        checkpoint: &LedgerCheckpoint,
-        report: &mut LedgerIntegrityReport,
-    ) -> Result<()> {
-        let leaf_hashes = self.operation_hashes_up_to(checkpoint.body.to_position)?;
-        let actual_count = i64::try_from(leaf_hashes.len()).map_err(|_| {
-            HemError::InvalidArgument("checkpoint operation count overflow".to_string())
-        })?;
-        if actual_count != checkpoint.body.operation_count {
-            report.issues.push(integrity_issue(
-                "error",
-                "checkpoint_merkle",
-                format!("checkpoint:{}", checkpoint.body.checkpoint_id),
-                format!(
-                    "operation count mismatch expected={} actual={actual_count}",
-                    checkpoint.body.operation_count
-                ),
-            ));
-        }
-        if !leaf_hashes.is_empty() {
-            let merkle_root = STANDARD_NO_PAD.encode(merkle_root(leaf_hashes.as_slice())?);
-            if merkle_root != checkpoint.body.merkle_root_b64 {
-                report.issues.push(integrity_issue(
-                    "error",
-                    "checkpoint_merkle",
-                    format!("checkpoint:{}", checkpoint.body.checkpoint_id),
-                    format!(
-                        "merkle root mismatch expected={} actual={}",
-                        checkpoint.body.merkle_root_b64, merkle_root
-                    ),
-                ));
-            }
         }
         Ok(())
     }
@@ -3353,17 +3371,117 @@ fn merkle_root(leaves: &[[u8; 32]]) -> Result<[u8; 32]> {
         for chunk in level.chunks(2) {
             let left = chunk[0];
             let right = if chunk.len() == 2 { chunk[1] } else { chunk[0] };
-            let mut hasher = Sha256::new();
-            hasher.update(left);
-            hasher.update(right);
-            let digest = hasher.finalize();
-            let mut parent = [0_u8; 32];
-            parent.copy_from_slice(digest.as_slice());
-            next.push(parent);
+            next.push(hash_merkle_pair(left, right));
         }
         level = next;
     }
     Ok(level[0])
+}
+
+#[derive(Debug, Clone, Default)]
+struct MerkleAccumulator {
+    operation_count: i64,
+    peaks: Vec<Option<[u8; 32]>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MerkleSummary {
+    operation_count: i64,
+    root: Option<[u8; 32]>,
+}
+
+impl MerkleAccumulator {
+    fn push(&mut self, leaf: [u8; 32]) {
+        self.operation_count = self.operation_count.saturating_add(1);
+        let mut height = 0_usize;
+        let mut node = leaf;
+        loop {
+            if height == self.peaks.len() {
+                self.peaks.push(Some(node));
+                break;
+            }
+            match self.peaks[height].take() {
+                Some(left) => {
+                    node = hash_merkle_pair(left, node);
+                    height += 1;
+                }
+                None => {
+                    self.peaks[height] = Some(node);
+                    break;
+                }
+            }
+        }
+    }
+
+    fn summary(&self) -> MerkleSummary {
+        MerkleSummary {
+            operation_count: self.operation_count,
+            root: self.root(),
+        }
+    }
+
+    fn root(&self) -> Option<[u8; 32]> {
+        let mut accumulated: Option<([u8; 32], usize)> = None;
+        for (height, peak) in self.peaks.iter().enumerate() {
+            let Some(left) = peak else {
+                continue;
+            };
+            accumulated = Some(match accumulated {
+                None => (*left, height),
+                Some((mut right, mut right_height)) => {
+                    while right_height < height {
+                        right = hash_merkle_pair(right, right);
+                        right_height += 1;
+                    }
+                    (hash_merkle_pair(*left, right), height + 1)
+                }
+            });
+        }
+        accumulated.map(|(root, _)| root)
+    }
+}
+
+fn hash_merkle_pair(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(left);
+    hasher.update(right);
+    let digest = hasher.finalize();
+    let mut parent = [0_u8; 32];
+    parent.copy_from_slice(digest.as_slice());
+    parent
+}
+
+fn verify_checkpoint_merkle_summary(
+    checkpoint: &LedgerCheckpoint,
+    summary: Option<&MerkleSummary>,
+    report: &mut LedgerIntegrityReport,
+) {
+    let actual_count = summary.map_or(0, |summary| summary.operation_count);
+    if actual_count != checkpoint.body.operation_count {
+        report.issues.push(integrity_issue(
+            "error",
+            "checkpoint_merkle",
+            format!("checkpoint:{}", checkpoint.body.checkpoint_id),
+            format!(
+                "operation count mismatch expected={} actual={actual_count}",
+                checkpoint.body.operation_count
+            ),
+        ));
+    }
+    if let Some(root) = summary.and_then(|summary| summary.root) {
+        let merkle_root_b64 = STANDARD_NO_PAD.encode(root);
+        if merkle_root_b64 != checkpoint.body.merkle_root_b64 {
+            report.issues.push(integrity_issue(
+                "error",
+                "checkpoint_merkle",
+                format!("checkpoint:{}", checkpoint.body.checkpoint_id),
+                format!(
+                    "merkle root mismatch expected={} actual={merkle_root_b64}",
+                    checkpoint.body.merkle_root_b64
+                ),
+            ));
+        }
+    }
 }
 
 fn decode_base64_exact<const N: usize>(label: &str, value: &str) -> Result<[u8; N]> {
@@ -3416,6 +3534,64 @@ fn blank_dash(value: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merkle_accumulator_matches_batch_roots_for_every_prefix() {
+        let leaves = (0_u32..257)
+            .map(|value| {
+                let digest = Sha256::digest(value.to_be_bytes());
+                let mut leaf = [0_u8; 32];
+                leaf.copy_from_slice(digest.as_slice());
+                leaf
+            })
+            .collect::<Vec<_>>();
+        let mut accumulator = MerkleAccumulator::default();
+        for (index, leaf) in leaves.iter().copied().enumerate() {
+            accumulator.push(leaf);
+            assert_eq!(
+                accumulator.root().expect("accumulator root"),
+                merkle_root(&leaves[..=index]).expect("batch root"),
+                "prefix length {}",
+                index + 1
+            );
+        }
+    }
+
+    #[test]
+    fn integrity_verification_checks_many_checkpoint_prefixes_in_one_pass() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let ledger = LedgerStore::open(root.path()).expect("open ledger");
+        let identity = NodeIdentity::generate("hmn_a", "node a").expect("identity");
+
+        for position in 1_i64..=64 {
+            append_metadata_operation(
+                &ledger,
+                &identity,
+                format!("hop_{position}").as_str(),
+                "hmc_a",
+                position,
+                "global",
+                format!("secret_{position}").as_str(),
+            );
+            ledger
+                .create_checkpoint(&identity, "hmc_a", position)
+                .expect("create checkpoint");
+        }
+
+        let report = ledger.verify_integrity().expect("verify integrity");
+        assert!(report.ok, "integrity issues: {:?}", report.issues);
+        assert_eq!(report.operations_checked, 64);
+        assert_eq!(report.checkpoints_checked, 64);
+        assert_eq!(
+            ledger
+                .latest_checkpoint_for_signer("hmc_a", "hmn_a")
+                .expect("latest checkpoint")
+                .expect("checkpoint")
+                .body
+                .to_position,
+            64
+        );
+    }
 
     #[test]
     fn list_materialized_secret_metadata_filters_by_cluster_and_scope() {

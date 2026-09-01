@@ -101,6 +101,7 @@ const DEFAULT_SCAN_MIN_VALUE_LENGTH: u32 = 8;
 const DEFAULT_CLUSTER_SYNC_INTERVAL_MS: u64 = 5_000;
 const DEFAULT_CLUSTER_SYNC_BATCH_LIMIT: u32 = 1_000;
 const DEFAULT_CLUSTER_SYNC_MAX_BACKOFF_MS: u64 = 30_000;
+const DEFAULT_CLUSTER_CHECKPOINT_INTERVAL_OPERATIONS: i64 = 1_000;
 const CLUSTER_SYNC_CONNECT_TIMEOUT_SECS: u64 = 3;
 const CLUSTER_SYNC_RPC_TIMEOUT_SECS: u64 = 10;
 const READ_RECEIPT_MASTER_RETRY_ATTEMPTS: usize = 5;
@@ -668,7 +669,11 @@ impl HemRuntimeService {
         policy_decision: &str,
         approval_reference: &str,
     ) -> Result<(), Status> {
-        if !self.cluster_runtime.enabled {
+        let ledger_read_audit = std::env::var("VALHALL_HEM_LEDGER_READ_AUDIT").ok();
+        if !ledger_read_audit_enabled(
+            self.cluster_runtime.enabled,
+            ledger_read_audit.as_deref(),
+        ) {
             return Ok(());
         }
         let (cluster_id, node_id) = self.require_cluster_identity()?;
@@ -5898,7 +5903,7 @@ async fn sync_configured_peer_once(
     let mut checkpoint_id = None;
     let mut checkpoint_position = None;
     let mut checkpoint_cosigned = false;
-    if let Some(checkpoint) = ensure_checkpoint_at_position(
+    if let Some(checkpoint) = ensure_checkpoint_if_due(
         &ledger,
         identity,
         config.cluster_id.as_str(),
@@ -5978,7 +5983,7 @@ async fn sync_configured_peer_once(
     })
 }
 
-fn ensure_checkpoint_at_position(
+fn ensure_checkpoint_if_due(
     ledger: &hem_core::LedgerStore,
     identity: &NodeIdentity,
     cluster_id: &str,
@@ -5987,17 +5992,38 @@ fn ensure_checkpoint_at_position(
     if to_position < 1 {
         return Ok(None);
     }
-    if let Some(existing) = ledger.list_checkpoints()?.into_iter().find(|checkpoint| {
-        checkpoint.body.cluster_id == cluster_id
-            && checkpoint.body.to_position == to_position
-            && checkpoint.signer_node_id == identity.node_id
-            && checkpoint.signing_public_key_b64 == identity.signing_public_key_b64
-    }) {
-        return Ok(Some(existing));
+    let latest = ledger.latest_checkpoint_for_signer(cluster_id, identity.node_id.as_str())?;
+    if let Some(existing) = latest.as_ref() {
+        if existing.body.to_position == to_position
+            && existing.signing_public_key_b64 == identity.signing_public_key_b64
+        {
+            return Ok(latest);
+        }
+    }
+    if !checkpoint_is_due(
+        to_position,
+        latest
+            .as_ref()
+            .map(|checkpoint| checkpoint.body.to_position),
+    ) {
+        return Ok(None);
     }
     ledger
         .create_checkpoint(identity, cluster_id, to_position)
         .map(Some)
+}
+
+fn checkpoint_is_due(to_position: i64, latest_checkpoint_position: Option<i64>) -> bool {
+    if to_position < 1 {
+        return false;
+    }
+    latest_checkpoint_position.is_none_or(|latest| {
+        to_position.saturating_sub(latest) >= DEFAULT_CLUSTER_CHECKPOINT_INTERVAL_OPERATIONS
+    })
+}
+
+fn ledger_read_audit_enabled(cluster_enabled: bool, configured: Option<&str>) -> bool {
+    cluster_enabled && configured.is_some_and(parse_bool_like)
 }
 
 fn ensure_latest_cluster_checkpoint(
@@ -6007,7 +6033,7 @@ fn ensure_latest_cluster_checkpoint(
 ) -> hem_core::Result<Option<CoreLedgerCheckpoint>> {
     let ledger = hem_core::LedgerStore::open(data_dir)?;
     let latest_position = ledger.latest_position()?;
-    ensure_checkpoint_at_position(
+    ensure_checkpoint_if_due(
         &ledger,
         identity,
         config.cluster_id.as_str(),
@@ -6178,6 +6204,23 @@ mod tests {
         assert!(second >= first);
         assert!(capped <= Duration::from_millis(1000));
         assert_eq!(first, settings.backoff_for_failure("hmn_peer", 1));
+    }
+
+    #[test]
+    fn checkpoint_creation_is_bounded_by_operation_interval() {
+        assert!(!checkpoint_is_due(0, None));
+        assert!(checkpoint_is_due(1, None));
+        assert!(!checkpoint_is_due(1_999, Some(1_000)));
+        assert!(checkpoint_is_due(2_000, Some(1_000)));
+        assert!(!checkpoint_is_due(900, Some(1_000)));
+    }
+
+    #[test]
+    fn distributed_read_audit_is_explicitly_opt_in() {
+        assert!(!ledger_read_audit_enabled(true, None));
+        assert!(!ledger_read_audit_enabled(true, Some("false")));
+        assert!(!ledger_read_audit_enabled(false, Some("true")));
+        assert!(ledger_read_audit_enabled(true, Some("true")));
     }
 
     #[test]

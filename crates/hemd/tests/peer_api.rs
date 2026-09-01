@@ -491,7 +491,11 @@ async fn read_receipts_survive_restart_and_are_listed_for_replication(
     config.save(&data_dir.path().join("cluster.toml"))?;
     identity.save(&data_dir.path().join("node-identity.json"))?;
 
-    let daemon = TestDaemon::start(data_dir.path()).await?;
+    let daemon = TestDaemon::start_with_env(
+        data_dir.path(),
+        &[("VALHALL_HEM_LEDGER_READ_AUDIT", "true")],
+    )
+    .await?;
     let mut client = connect_client(daemon.endpoint.as_str()).await?;
     let init = client
         .init_hem(InitHemRequest { force: false })
@@ -544,7 +548,11 @@ async fn read_receipts_survive_restart_and_are_listed_for_replication(
     drop(client);
     drop(daemon);
 
-    let restarted = TestDaemon::start(data_dir.path()).await?;
+    let restarted = TestDaemon::start_with_env(
+        data_dir.path(),
+        &[("VALHALL_HEM_LEDGER_READ_AUDIT", "true")],
+    )
+    .await?;
     let mut peer = connect_client(restarted.endpoint.as_str()).await?;
     let operations = peer
         .peer_list_operations(PeerListOperationsRequest {
@@ -736,8 +744,14 @@ async fn peer_quorum_policy_requires_signed_online_peer_evidence(
     }
     .save(&local_dir.path().join("cluster.toml"))?;
     local_identity.save(&local_dir.path().join("node-identity.json"))?;
-    let local_daemon =
-        TestDaemon::start_with_env(local_dir.path(), &[("VALHALL_HEM_CLUSTER_SYNC", "0")]).await?;
+    let local_daemon = TestDaemon::start_with_env(
+        local_dir.path(),
+        &[
+            ("VALHALL_HEM_CLUSTER_SYNC", "0"),
+            ("VALHALL_HEM_LEDGER_READ_AUDIT", "true"),
+        ],
+    )
+    .await?;
     let mut client = connect_client(local_daemon.endpoint.as_str()).await?;
     let operator_token = HemStore::open(local_dir.path())?
         .token_manager()?
@@ -1155,8 +1169,14 @@ async fn non_master_read_receipts_are_sequenced_by_master() -> Result<(), Box<dy
     }
     .save(&master_dir.path().join("cluster.toml"))?;
     master_identity.save(&master_dir.path().join("node-identity.json"))?;
-    let master_daemon =
-        TestDaemon::start_with_env(master_dir.path(), &[("VALHALL_HEM_CLUSTER_SYNC", "0")]).await?;
+    let master_daemon = TestDaemon::start_with_env(
+        master_dir.path(),
+        &[
+            ("VALHALL_HEM_CLUSTER_SYNC", "0"),
+            ("VALHALL_HEM_LEDGER_READ_AUDIT", "true"),
+        ],
+    )
+    .await?;
 
     ClusterConfig {
         enabled: true,
@@ -1174,8 +1194,14 @@ async fn non_master_read_receipts_are_sequenced_by_master() -> Result<(), Box<dy
     }
     .save(&worker_dir.path().join("cluster.toml"))?;
     worker_identity.save(&worker_dir.path().join("node-identity.json"))?;
-    let worker_daemon =
-        TestDaemon::start_with_env(worker_dir.path(), &[("VALHALL_HEM_CLUSTER_SYNC", "0")]).await?;
+    let worker_daemon = TestDaemon::start_with_env(
+        worker_dir.path(),
+        &[
+            ("VALHALL_HEM_CLUSTER_SYNC", "0"),
+            ("VALHALL_HEM_LEDGER_READ_AUDIT", "true"),
+        ],
+    )
+    .await?;
 
     let mut master_client = connect_client(master_daemon.endpoint.as_str()).await?;
     let master_token = HemStore::open(master_dir.path())?
