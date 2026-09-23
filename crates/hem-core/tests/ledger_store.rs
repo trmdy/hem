@@ -35,6 +35,104 @@ fn ledger_appends_operations_and_lists_after_cursor() {
 }
 
 #[test]
+fn ledger_open_and_peer_sync_reads_do_not_commit() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let store = LedgerStore::open(root.path()).expect("open ledger");
+    let identity = NodeIdentity::generate("hmn_a", "local").expect("identity");
+    append_signed_operation(&store, &identity, "hop_a", 1, 1);
+    let ledger_path = store.path().to_path_buf();
+    drop(store);
+
+    let observer = Connection::open(ledger_path.as_path()).expect("observer");
+    let data_version = || -> i64 {
+        observer
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .expect("data_version")
+    };
+    let before = data_version();
+
+    // The calls hemd makes per peer_hello / peer_list_operations / sync tick, including
+    // a fresh open of an already-migrated ledger.
+    let store = LedgerStore::open(root.path()).expect("reopen ledger");
+    let reopened = LedgerStore::open(root.path()).expect("reopen ledger again");
+    assert_eq!(store.latest_position().expect("latest"), 1);
+    assert!(store.latest_body_hash().expect("hash").is_some());
+    assert_eq!(reopened.list_after(0, 1_000).expect("list").len(), 1);
+    assert!(reopened.get_peer_cursor("hmn_b").expect("cursor").is_none());
+    assert!(reopened
+        .latest_checkpoint_for_signer("hmc_a", "hmn_a")
+        .expect("checkpoint")
+        .is_none());
+    assert!(reopened.list_checkpoints().expect("checkpoints").is_empty());
+
+    assert_eq!(
+        data_version(),
+        before,
+        "read-only ledger calls committed a write"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ledger_keeps_wal_open_between_calls_while_a_store_is_alive() {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let store = LedgerStore::open(root.path()).expect("open ledger");
+    let identity = NodeIdentity::generate("hmn_a", "local").expect("identity");
+    append_signed_operation(&store, &identity, "hop_a", 1, 1);
+    let wal_path = store.path().with_extension("sqlite3-wal");
+    let wal_inode = std::fs::metadata(wal_path.as_path())
+        .expect("wal exists while store is alive")
+        .ino();
+
+    for _ in 0..3 {
+        let per_request = LedgerStore::open(root.path()).expect("per-request open");
+        assert_eq!(per_request.latest_position().expect("latest"), 1);
+        store.list_after(0, 10).expect("list");
+    }
+    assert_eq!(
+        std::fs::metadata(wal_path.as_path())
+            .expect("wal still exists")
+            .ino(),
+        wal_inode,
+        "WAL was deleted and recreated between calls"
+    );
+    for sidecar in [wal_path.clone(), store.path().with_extension("sqlite3-shm")] {
+        let mode = std::fs::metadata(sidecar.as_path())
+            .expect("sidecar")
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "{} is not owner-only", sidecar.display());
+    }
+
+    drop(store);
+    assert!(
+        !wal_path.exists(),
+        "closing the last store should checkpoint and remove the WAL"
+    );
+}
+
+#[test]
+fn ledger_open_migrates_a_replaced_file_while_old_store_is_alive() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let store = LedgerStore::open(root.path()).expect("open ledger");
+    let identity = NodeIdentity::generate("hmn_a", "local").expect("identity");
+    append_signed_operation(&store, &identity, "hop_a", 1, 1);
+    let ledger_path = store.path().to_path_buf();
+    for suffix in ["", "-wal", "-shm"] {
+        let path = format!("{}{suffix}", ledger_path.display());
+        let _ = std::fs::remove_file(path);
+    }
+
+    let replacement = LedgerStore::open(root.path()).expect("open replaced ledger");
+    assert_eq!(replacement.latest_position().expect("latest"), 0);
+    append_signed_operation(&replacement, &identity, "hop_b", 1, 1);
+    assert_eq!(replacement.latest_position().expect("latest"), 1);
+    drop(store);
+}
+
+#[test]
 fn ledger_rejects_duplicate_node_sequence_without_reordering_log() {
     let root = tempfile::tempdir().expect("tempdir");
     let store = LedgerStore::open(root.path()).expect("open ledger");

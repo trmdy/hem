@@ -1,6 +1,8 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fmt,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock, PoisonError, Weak},
     time::Duration,
 };
 
@@ -23,6 +25,7 @@ use crate::{
 const LEDGER_DIR: &str = "distributed";
 const LEDGER_FILE: &str = "ledger.sqlite3";
 const BUSY_TIMEOUT_SECONDS: u64 = 5;
+const LEDGER_SCHEMA_VERSION: i64 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerOperationInput {
@@ -259,19 +262,112 @@ pub struct LedgerOperation {
 #[derive(Debug, Clone)]
 pub struct LedgerStore {
     path: PathBuf,
+    _anchor: Arc<LedgerAnchor>,
+}
+
+/// One connection held open per ledger file while any `LedgerStore` for it is alive.
+///
+/// Every method opens a short-lived connection. Without an anchor each of those is the
+/// last connection on close, so SQLite checkpoints and deletes `-wal`/`-shm` and the next
+/// call recreates them: a read-only request then costs file creates, unlinks and fsyncs.
+/// The anchor also records that the file is already migrated and permissioned, so repeated
+/// `LedgerStore::open` calls for the same file do no schema work.
+struct LedgerAnchor {
+    file_id: Option<(u64, u64)>,
+    _conn: Mutex<Connection>,
+}
+
+impl fmt::Debug for LedgerAnchor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LedgerAnchor")
+            .field("file_id", &self.file_id)
+            .finish_non_exhaustive()
+    }
+}
+
+fn ledger_anchors() -> &'static Mutex<HashMap<PathBuf, Weak<LedgerAnchor>>> {
+    static ANCHORS: OnceLock<Mutex<HashMap<PathBuf, Weak<LedgerAnchor>>>> = OnceLock::new();
+    ANCHORS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(unix)]
+fn create_private_file_if_missing(path: &Path) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn create_private_file_if_missing(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ledger_file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    std::fs::metadata(path)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn ledger_file_id(_path: &Path) -> Option<(u64, u64)> {
+    None
 }
 
 impl LedgerStore {
     pub fn open(data_dir: impl Into<PathBuf>) -> Result<Self> {
         let ledger_dir = data_dir.into().join(LEDGER_DIR);
+        let path = ledger_dir.join(LEDGER_FILE);
+        let mut anchors = ledger_anchors()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(anchor) = anchors.get(&path).and_then(Weak::upgrade) {
+            // Reuse only while the anchored file is still the one at `path`; a replaced or
+            // deleted ledger gets a fresh migration below.
+            if anchor.file_id.is_some() && anchor.file_id == ledger_file_id(path.as_path()) {
+                return Ok(Self {
+                    path,
+                    _anchor: anchor,
+                });
+            }
+        }
+
         ensure_private_dir(ledger_dir.as_path())?;
-        let store = Self {
-            path: ledger_dir.join(LEDGER_FILE),
-        };
-        let conn = store.connect()?;
+        create_private_file_if_missing(path.as_path())?;
+        let conn = open_connection(path.as_path())?;
         migrate(&conn)?;
-        set_owner_read_write_only(store.path.as_path())?;
-        Ok(store)
+        set_owner_read_write_only(path.as_path())?;
+        // The anchor keeps -wal/-shm on disk; SQLite copies the database file's mode when it
+        // creates them, but tighten any left behind by an older, broader database file.
+        for sidecar in [
+            path.with_extension("sqlite3-wal"),
+            path.with_extension("sqlite3-shm"),
+        ] {
+            if sidecar.exists() {
+                set_owner_read_write_only(sidecar.as_path())?;
+            }
+        }
+        let anchor = Arc::new(LedgerAnchor {
+            file_id: ledger_file_id(path.as_path()),
+            _conn: Mutex::new(conn),
+        });
+        anchors.retain(|_, anchor| anchor.strong_count() > 0);
+        anchors.insert(path.clone(), Arc::downgrade(&anchor));
+        Ok(Self {
+            path,
+            _anchor: anchor,
+        })
     }
 
     #[must_use]
@@ -2107,13 +2203,17 @@ impl LedgerStore {
     }
 
     fn connect(&self) -> Result<Connection> {
-        let conn = Connection::open(self.path.as_path())?;
-        conn.busy_timeout(Duration::from_secs(BUSY_TIMEOUT_SECONDS))?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        Ok(conn)
+        open_connection(self.path.as_path())
     }
+}
+
+fn open_connection(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(BUSY_TIMEOUT_SECONDS))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    Ok(conn)
 }
 
 impl LedgerOperationInput {
@@ -2292,6 +2392,12 @@ impl LedgerCheckpointCosignatureBody {
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
+    // Setting user_version is a write transaction, so only run the idempotent schema batch
+    // when the file is behind. A current ledger must open without writing.
+    let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if user_version >= LEDGER_SCHEMA_VERSION {
+        return Ok(());
+    }
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS ledger_operations (
@@ -2487,10 +2593,9 @@ fn migrate(conn: &Connection) -> Result<()> {
             ON ledger_forks(cluster_id, epoch);
         CREATE INDEX IF NOT EXISTS idx_ledger_fork_replays_fork
             ON ledger_fork_replays(fork_id, created_at);
-
-        PRAGMA user_version = 10;
         ",
     )?;
+    conn.pragma_update(None, "user_version", LEDGER_SCHEMA_VERSION)?;
     Ok(())
 }
 

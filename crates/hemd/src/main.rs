@@ -20,9 +20,9 @@ use hem_core::{
     node_statement_hash_b64, peer_transport_auth_statement_bytes, verify_node_statement_signature,
     AuditClientInfo as CoreAuditClientInfo, AuditEntry as CoreAuditEntry,
     AuditTokenInfo as CoreAuditTokenInfo, AuditTransportInfo as CoreAuditTransportInfo,
-    ClusterConfig, CollisionAgreementStatement, DeleteApprovalRecord,
-    DeleteApprovalStore, EnvelopeEncryptedValue, GrantInfo as CoreGrantInfo,
-    GroupInfo as CoreGroupInfo, HemError, HemStore, LedgerCheckpoint as CoreLedgerCheckpoint,
+    ClusterConfig, CollisionAgreementStatement, DeleteApprovalRecord, DeleteApprovalStore,
+    EnvelopeEncryptedValue, GrantInfo as CoreGrantInfo, GroupInfo as CoreGroupInfo, HemError,
+    HemStore, LedgerCheckpoint as CoreLedgerCheckpoint,
     LedgerCheckpointBody as CoreLedgerCheckpointBody,
     LedgerCheckpointCosignature as CoreLedgerCheckpointCosignature,
     LedgerCheckpointCosignatureBody as CoreLedgerCheckpointCosignatureBody,
@@ -670,10 +670,7 @@ impl HemRuntimeService {
         approval_reference: &str,
     ) -> Result<(), Status> {
         let ledger_read_audit = std::env::var("VALHALL_HEM_LEDGER_READ_AUDIT").ok();
-        if !ledger_read_audit_enabled(
-            self.cluster_runtime.enabled,
-            ledger_read_audit.as_deref(),
-        ) {
+        if !ledger_read_audit_enabled(self.cluster_runtime.enabled, ledger_read_audit.as_deref()) {
             return Ok(());
         }
         let (cluster_id, node_id) = self.require_cluster_identity()?;
@@ -6110,6 +6107,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "starting hemd"
     );
 
+    // Handlers and the sync loop open the ledger per call; keeping one store alive for the
+    // daemon's lifetime keeps SQLite's WAL open so read-only calls do not write to disk.
+    let _ledger_pin = if cluster_runtime.enabled {
+        match hem_core::LedgerStore::open(data_dir.as_path()) {
+            Ok(ledger) => Some(ledger),
+            Err(err) => {
+                warn!(error = %err, "hem ledger pin unavailable; ledger calls reopen per request");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let sync_loop = spawn_cluster_sync_loop(data_dir.clone(), &cluster_runtime);
     Server::builder()
         .add_service(HemRuntimeServer::new(HemRuntimeService::new(
