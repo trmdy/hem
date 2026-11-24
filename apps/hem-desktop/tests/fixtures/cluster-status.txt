@@ -1,0 +1,14 @@
+cluster_enabled=true
+data_dir=/home/user/.valhall/system-daemons/data/hem
+cluster_id=hmc_democluster000000000000000
+node_id=hmn_main
+listen=http://192.0.2.206:50091
+quorum=1
+master_node_id=hmn_main
+peers=5
+identity_public_key=pKK/mDZzNB83rkvCRS1RD8hbPn7Z+TixBSK0LE+SIPo
+checkpoints=8376
+latest_checkpoint_id=hcp_democheckpoint000000000000
+latest_checkpoint_position=7882
+latest_checkpoint_hash=5xz3Vek5pzGh+oVeVPjI1VWV33xsciBnEAuZnz2O19A
+latest_checkpoint_cosignatures=1

@@ -1,0 +1,42 @@
+/* Declare the reset layer BEFORE StyleX's priority layers so it loses to
+   every StyleX rule. An unlayered reset would beat ALL layered StyleX
+   styles regardless of specificity (that bug made primary buttons render
+   ink-on-ink: `button { color: inherit }` overrode `color: onInk`). */
+@layer reset;
+
+/* The @stylex directive is replaced with the compiled StyleX rules by
+   @stylexjs/postcss-plugin at build time. */
+@stylex;
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #ffffff;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+::selection {
+  background: #26282c;
+  color: #fff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+@layer reset {
+  input,
+  textarea,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+}

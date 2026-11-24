@@ -1,0 +1,22 @@
+appId: io.valhall.hem-desk
+productName: Hem Desk
+directories:
+  buildResources: build
+  output: release
+files:
+  - out/**
+  - proto/**
+  - package.json
+asar: true
+npmRebuild: false
+mac:
+  # Personal install: ad-hoc signed (electron-builder signs arm64 ad-hoc when
+  # identity is null), not notarized. Locally built apps carry no quarantine
+  # attribute, so Gatekeeper does not object.
+  identity: null
+  target:
+    - target: dir
+      arch:
+        - arm64
+  category: public.app-category.developer-tools
+  icon: build/icon.png
