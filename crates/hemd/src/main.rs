@@ -41,8 +41,8 @@ use tonic::{
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
-use valhall_events::topics;
-use valhall_net::{Mesh, MeshConfig};
+use hem_events::topics;
+use hem_net::{Mesh, MeshConfig};
 
 pub mod proto {
     #![allow(clippy::large_enum_variant)]
@@ -640,7 +640,7 @@ impl HemRuntimeService {
         let warnings = audit_warnings(action, caller);
         let entry = CoreAuditEntry {
             schema_version: hem_core::AUDIT_SCHEMA_VERSION,
-            audit_id: valhall_config::ids::generate_prefixed_entropy_id("aud"),
+            audit_id: hem_config::ids::generate_prefixed_entropy_id("aud"),
             ts: Utc::now(),
             action: action.to_string(),
             actor,
@@ -686,7 +686,7 @@ impl HemRuntimeService {
         let keys = sorted_secret_keys(secret.values.keys());
         let receipt_id = format!(
             "hrr_{}",
-            valhall_config::ids::generate_entropy_prefixed_ulid()
+            hem_config::ids::generate_entropy_prefixed_ulid()
         );
         if !self.cluster_runtime.is_master_node() {
             self.submit_read_receipts_to_master(
@@ -774,7 +774,7 @@ impl HemRuntimeService {
         CoreLedgerOperationInput {
             operation_id: format!(
                 "hop_{}",
-                valhall_config::ids::generate_entropy_prefixed_ulid()
+                hem_config::ids::generate_entropy_prefixed_ulid()
             ),
             cluster_id: cluster_id.to_string(),
             node_id: identity.node_id.clone(),
@@ -1317,7 +1317,7 @@ impl HemRuntimeService {
             .unwrap_or_default();
         let nonce = format!(
             "hqn_{}",
-            valhall_config::ids::generate_entropy_prefixed_ulid()
+            hem_config::ids::generate_entropy_prefixed_ulid()
         );
         let secret_scope = scope_label(&secret.info.scope);
         let secret_name = secret.info.name.as_str();
@@ -4937,7 +4937,7 @@ fn signed_peer_transport_request<T>(
 ) -> hem_core::Result<Request<T>> {
     let nonce = format!(
         "hpt_{}",
-        valhall_config::ids::generate_entropy_prefixed_ulid()
+        hem_config::ids::generate_entropy_prefixed_ulid()
     );
     let timestamp_unix = Utc::now().timestamp();
     let statement_bytes = peer_transport_auth_statement_bytes(

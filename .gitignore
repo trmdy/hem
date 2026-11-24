@@ -1,27 +1,7 @@
 .DS_Store
 
-# Rust
 /target
 
-# Node
 node_modules
-.pnpm-store
-
-# Build artifacts
 dist
 coverage
-
-# Local secrets
-.valhall.openai.key
-.vallhall.openai.key
-
-# Fjell local runtime state
-.fj/
-.checkouts/
-.fj-checkouts/
-
-# Swarm local runtime state
-.swarm-runtime/
-configs/swarm/identities.env
-
-.worktrees

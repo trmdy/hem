@@ -1,5 +1,5 @@
 [package]
-name = "valhall-events"
+name = "hem-events"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

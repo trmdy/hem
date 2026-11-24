@@ -122,7 +122,7 @@ impl DeleteApprovalStore {
 
         let now = Utc::now();
         let record = DeleteApprovalRecord {
-            request_id: valhall_config::ids::generate_prefixed_entropy_id("apr"),
+            request_id: hem_config::ids::generate_prefixed_entropy_id("apr"),
             action,
             state: ApprovalState::Pending,
             secret_scope,
@@ -207,7 +207,7 @@ impl DeleteApprovalStore {
             let issued = format!(
                 "dar1:{}:{}",
                 record.request_id,
-                valhall_config::ids::generate_entropy_prefixed_ulid()
+                hem_config::ids::generate_entropy_prefixed_ulid()
             );
             record.approval_receipt = Some(issued.clone());
             record.approval_receipt_expires_at =
@@ -443,7 +443,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     }
     let temp = path.with_extension(format!(
         "tmp-{}.json",
-        valhall_config::ids::generate_entropy_prefixed_ulid()
+        hem_config::ids::generate_entropy_prefixed_ulid()
     ));
     let body = serde_json::to_vec_pretty(value)?;
     fs::write(temp.as_path(), body)?;
@@ -499,7 +499,7 @@ mod tests {
             .split_once('_')
             .map(|(_, tail)| tail)
             .expect("request id separator");
-        assert_eq!(suffix.len(), valhall_config::ids::CANONICAL_ULID_LENGTH);
+        assert_eq!(suffix.len(), hem_config::ids::CANONICAL_ULID_LENGTH);
         assert!(suffix
             .chars()
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()));

@@ -512,7 +512,7 @@ fn write_atomic(path: &Path, body: &[u8], mode: Option<u32>) -> Result<()> {
 fn temp_path(path: &Path) -> PathBuf {
     let ext = format!(
         "tmp-{}",
-        valhall_config::ids::generate_entropy_prefixed_ulid()
+        hem_config::ids::generate_entropy_prefixed_ulid()
     );
     path.with_extension(ext)
 }

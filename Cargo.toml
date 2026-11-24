@@ -1,42 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/ida",
-  "crates/idad",
-  "crates/veft-core",
-  "crates/veftd",
-  "crates/due",
-  "crates/dued",
-  "crates/valhall-auth",
-  "crates/valhall-config",
-  "crates/valhall-events",
-  "crates/valhall-net",
-  "crates/ting",
-  "crates/tingd",
-  "crates/bod",
-  "crates/bod-core",
-  "crates/bodd",
-  "crates/skip",
-  "crates/skip-core",
-  "crates/skipd",
-  "crates/slik",
-  "crates/slikd",
-  "crates/smi",
-  "crates/smi-core",
-  "crates/smid",
   "crates/hem",
+  "crates/hemd",
   "crates/hem-core",
   "crates/hem-client",
-  "crates/hemd",
-  "crates/hjul",
-  "crates/hjuld",
-  "crates/vis",
-  "crates/vis-core",
-  "crates/visd",
-  "crates/vh",
-  "crates/fj",
-  "crates/fjell-core",
-  "crates/verk",
+  "crates/hem-config",
+  "crates/hem-events",
+  "crates/hem-net",
 ]
 
 [workspace.package]
@@ -46,23 +17,16 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
-async-trait = "0.1"
 async-nats = "0.39"
 base64 = "0.22"
 chacha20poly1305 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-fastembed = "5.11.0"
 fs2 = "0.4"
-getrandom = "0.2"
 hmac = "0.12"
-notify = "8"
-petgraph = "0.6"
 prost = "0.13"
 rand = "0.8"
-redis = { version = "0.27", features = ["tokio-comp"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

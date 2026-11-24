@@ -187,7 +187,7 @@ impl PolicyStore {
         let lease = OfflineLease {
             lease_id: format!(
                 "hol_{}",
-                valhall_config::ids::generate_entropy_prefixed_ulid()
+                hem_config::ids::generate_entropy_prefixed_ulid()
             ),
             scope: input.scope,
             name: input.name,

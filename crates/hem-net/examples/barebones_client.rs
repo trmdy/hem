@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};
-use valhall_net::{Mesh, MeshConfig};
+use hem_net::{Mesh, MeshConfig};
 
 const REQUEST_SUBJECT: &str = "valhall.test.barebones.echo";
 const EVENT_SUBJECT: &str = "valhall.test.barebones.received";

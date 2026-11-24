@@ -1,5 +1,5 @@
 [package]
-name = "valhall-net"
+name = "hem-net"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -20,7 +20,7 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
 tracing.workspace = true
-valhall-events = { path = "../valhall-events" }
+hem-events = { path = "../hem-events" }
 toml = "0.8"
 
 [dev-dependencies]

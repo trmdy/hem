@@ -280,7 +280,7 @@ impl TokenManager {
         let ttl_chrono =
             chrono::Duration::from_std(input.ttl).map_err(|_| HemError::TokenTtlExceeded)?;
         let claims = TokenClaims {
-            token_id: valhall_config::ids::generate_prefixed_entropy_id("tok"),
+            token_id: hem_config::ids::generate_prefixed_entropy_id("tok"),
             token_type: input.token_type,
             issued_at: now,
             expires_at: now + ttl_chrono,
@@ -474,7 +474,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     }
     let temp = path.with_extension(format!(
         "tmp-{}.json",
-        valhall_config::ids::generate_entropy_prefixed_ulid()
+        hem_config::ids::generate_entropy_prefixed_ulid()
     ));
     let body = serde_json::to_vec_pretty(value)?;
     fs::write(temp.as_path(), body)?;

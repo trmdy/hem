@@ -1,4 +1,4 @@
-use valhall_net::{Mesh, MeshConfig};
+use hem_net::{Mesh, MeshConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

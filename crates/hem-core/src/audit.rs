@@ -168,7 +168,7 @@ fn write_jsonl_atomic(path: &Path, entries: &[AuditEntry]) -> Result<()> {
     }
     let temp = path.with_extension(format!(
         "tmp-{}.jsonl",
-        valhall_config::ids::generate_entropy_prefixed_ulid()
+        hem_config::ids::generate_entropy_prefixed_ulid()
     ));
     let mut body = String::new();
     for entry in entries {

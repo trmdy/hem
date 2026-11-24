@@ -20,7 +20,7 @@ subtle.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
-valhall-config = { path = "../valhall-config" }
+hem-config = { path = "../hem-config" }
 x25519-dalek.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

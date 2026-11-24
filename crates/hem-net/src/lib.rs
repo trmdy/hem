@@ -1,4 +1,4 @@
-//! `valhall-net` is the Sprint-1 mesh communication crate for Valhall daemons.
+//! `hem-net` is the Sprint-1 mesh communication crate for Valhall daemons.
 //!
 //! It wraps:
 //! - gRPC request/response via [`Mesh::call`]
@@ -6,7 +6,7 @@
 //!
 //! Quickstart:
 //! ```no_run
-//! use valhall_net::{Mesh, MeshConfig};
+//! use hem_net::{Mesh, MeshConfig};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,7 +30,7 @@
 //! - `VALHALL_NET_SERVICE_ENDPOINT__<SERVICE>`
 //!
 //! Migration note (Sprint-1):
-//! downstream crates should use `valhall-net::Mesh` instead of importing `tonic`/`async-nats`
+//! downstream crates should use `hem_net::Mesh` instead of importing `tonic`/`async-nats`
 //! directly for normal daemon communication paths.
 //!
 mod config;
@@ -45,7 +45,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 use tracing::{debug, info, warn};
-use valhall_events::SystemEvent;
+use hem_events::SystemEvent;
 
 pub use config::MeshConfig;
 pub use error::{MeshError, Result};

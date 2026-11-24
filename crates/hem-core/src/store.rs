@@ -417,7 +417,7 @@ impl HemStore {
         let input = LedgerOperationInput {
             operation_id: format!(
                 "hop_{}",
-                valhall_config::ids::generate_entropy_prefixed_ulid()
+                hem_config::ids::generate_entropy_prefixed_ulid()
             ),
             cluster_id: cluster_id.to_string(),
             node_id: identity.node_id.clone(),
@@ -460,7 +460,7 @@ impl HemStore {
                 LedgerOperationInput {
                     operation_id: format!(
                         "hop_{}",
-                        valhall_config::ids::generate_entropy_prefixed_ulid()
+                        hem_config::ids::generate_entropy_prefixed_ulid()
                     ),
                     cluster_id: input.cluster_id.to_string(),
                     node_id: input.identity.node_id.clone(),
@@ -1641,7 +1641,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     }
     let temp = path.with_extension(format!(
         "tmp-{}.json",
-        valhall_config::ids::generate_entropy_prefixed_ulid()
+        hem_config::ids::generate_entropy_prefixed_ulid()
     ));
     let body = serde_json::to_vec_pretty(value)?;
     fs::write(temp.as_path(), body)?;

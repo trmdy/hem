@@ -2560,7 +2560,7 @@ fn append_cluster_security_audit(data_dir: &Path, issue_count: usize) {
     };
     let entry = CoreAuditEntry {
         schema_version: hem_core::AUDIT_SCHEMA_VERSION,
-        audit_id: valhall_config::ids::generate_prefixed_entropy_id("aud"),
+        audit_id: hem_config::ids::generate_prefixed_entropy_id("aud"),
         ts: Utc::now(),
         action: "cluster.verify.security".to_string(),
         actor: "hem-cli".to_string(),
@@ -2805,7 +2805,7 @@ async fn collect_collision_quorum_agreement(
     let requester_latest_body_hash_b64 = ledger.latest_body_hash()?.unwrap_or_default();
     let nonce = format!(
         "hca_{}",
-        valhall_config::ids::generate_entropy_prefixed_ulid()
+        hem_config::ids::generate_entropy_prefixed_ulid()
     );
     let mut accepted = Vec::new();
     let mut failures = Vec::new();
@@ -3013,7 +3013,7 @@ fn run_cluster_init(
     fs::create_dir_all(data_dir.as_path())?;
     let cluster_id = format!(
         "hmc_{}",
-        valhall_config::ids::generate_entropy_prefixed_ulid()
+        hem_config::ids::generate_entropy_prefixed_ulid()
     );
     let master_node_id = master_node_id.unwrap_or_else(|| node_id.clone());
     let config = ClusterConfig {
@@ -3768,7 +3768,7 @@ fn signed_peer_transport_request<T>(
 ) -> Result<Request<T>, Box<dyn std::error::Error>> {
     let nonce = format!(
         "hpt_{}",
-        valhall_config::ids::generate_entropy_prefixed_ulid()
+        hem_config::ids::generate_entropy_prefixed_ulid()
     );
     let timestamp_unix = Utc::now().timestamp();
     let statement_bytes = peer_transport_auth_statement_bytes(
@@ -3915,7 +3915,7 @@ impl Interceptor for BearerAuthInterceptor {
         for (key, value) in &self.client_headers {
             request.metadata_mut().insert(*key, value.clone());
         }
-        let request_id = valhall_config::ids::generate_prefixed_entropy_id("req");
+        let request_id = hem_config::ids::generate_prefixed_entropy_id("req");
         if let Ok(value) = MetadataValue::try_from(request_id.as_str()) {
             request
                 .metadata_mut()

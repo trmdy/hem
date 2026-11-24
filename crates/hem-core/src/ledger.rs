@@ -771,7 +771,7 @@ impl LedgerStore {
         let body = LedgerCheckpointBody {
             checkpoint_id: format!(
                 "hcp_{}",
-                valhall_config::ids::generate_entropy_prefixed_ulid()
+                hem_config::ids::generate_entropy_prefixed_ulid()
             ),
             cluster_id: cluster_id.to_string(),
             to_position,
@@ -1242,7 +1242,7 @@ impl LedgerStore {
         let input = LedgerOperationInput {
             operation_id: format!(
                 "hop_{}",
-                valhall_config::ids::generate_entropy_prefixed_ulid()
+                hem_config::ids::generate_entropy_prefixed_ulid()
             ),
             cluster_id: collision.cluster_id.clone(),
             node_id: identity.node_id.clone(),
@@ -1291,11 +1291,11 @@ impl LedgerStore {
         let epoch = self.next_fork_epoch(cluster_id)?;
         let fork_id = format!(
             "hfork_{}",
-            valhall_config::ids::generate_entropy_prefixed_ulid()
+            hem_config::ids::generate_entropy_prefixed_ulid()
         );
         let operation_id = format!(
             "hop_{}",
-            valhall_config::ids::generate_entropy_prefixed_ulid()
+            hem_config::ids::generate_entropy_prefixed_ulid()
         );
         let created_at = Utc::now();
         let input = LedgerOperationInput {
@@ -1418,11 +1418,11 @@ impl LedgerStore {
         let replay_policy = "checkpoint_then_after_fork";
         let replay_id = format!(
             "hrpl_{}",
-            valhall_config::ids::generate_entropy_prefixed_ulid()
+            hem_config::ids::generate_entropy_prefixed_ulid()
         );
         let operation_id = format!(
             "hop_{}",
-            valhall_config::ids::generate_entropy_prefixed_ulid()
+            hem_config::ids::generate_entropy_prefixed_ulid()
         );
         let created_at = Utc::now();
         let operation_input = LedgerOperationInput {

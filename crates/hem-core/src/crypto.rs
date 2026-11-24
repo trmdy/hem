@@ -60,7 +60,7 @@ pub fn generate_master_key() -> MasterKey {
     MasterKey {
         key_id: format!(
             "mk-{}",
-            valhall_config::ids::generate_entropy_prefixed_ulid()
+            hem_config::ids::generate_entropy_prefixed_ulid()
         ),
         key_bytes,
     }
@@ -158,7 +158,7 @@ pub fn envelope_encrypt_for_nodes(
         alg: "hem-node-envelope-v1".to_string(),
         data_key_id: format!(
             "hdek_{}",
-            valhall_config::ids::generate_entropy_prefixed_ulid()
+            hem_config::ids::generate_entropy_prefixed_ulid()
         ),
         nonce_b64: STANDARD_NO_PAD.encode(nonce),
         ciphertext_b64: STANDARD_NO_PAD.encode(ciphertext),

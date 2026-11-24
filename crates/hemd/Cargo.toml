@@ -15,9 +15,9 @@ tokio.workspace = true
 tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-valhall-config = { path = "../valhall-config" }
-valhall-events = { path = "../valhall-events" }
-valhall-net = { path = "../valhall-net" }
+hem-config = { path = "../hem-config" }
+hem-events = { path = "../hem-events" }
+hem-net = { path = "../hem-net" }
 
 [dev-dependencies]
 rusqlite.workspace = true

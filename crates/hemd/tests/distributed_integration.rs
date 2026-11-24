@@ -167,7 +167,7 @@ fn signed_peer_request<T>(
 ) -> Request<T> {
     let nonce = format!(
         "hpt_{}",
-        valhall_config::ids::generate_entropy_prefixed_ulid()
+        hem_config::ids::generate_entropy_prefixed_ulid()
     );
     let timestamp_unix = Utc::now().timestamp();
     let statement = peer_transport_auth_statement_bytes(

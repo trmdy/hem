@@ -1,5 +1,5 @@
 [package]
-name = "valhall-config"
+name = "hem-config"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

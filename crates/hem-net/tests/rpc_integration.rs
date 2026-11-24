@@ -7,7 +7,7 @@ use tonic_health::{
     server::health_reporter,
     ServingStatus as ServiceServingStatus,
 };
-use valhall_net::{Mesh, MeshConfig, MeshError};
+use hem_net::{Mesh, MeshConfig, MeshError};
 
 const HEALTH_CHECK_PATH: &str = "/grpc.health.v1.Health/Check";
 const REGISTERED_SERVICE: &str = "valhall.smi.v1.Mesh";

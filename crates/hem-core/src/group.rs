@@ -86,7 +86,7 @@ fn write_json_atomic<T: Serialize>(path: &std::path::Path, value: &T) -> Result<
     }
     let temp = path.with_extension(format!(
         "tmp-{}.json",
-        valhall_config::ids::generate_entropy_prefixed_ulid()
+        hem_config::ids::generate_entropy_prefixed_ulid()
     ));
     let body = serde_json::to_vec_pretty(value)?;
     fs::write(temp.as_path(), body)?;
