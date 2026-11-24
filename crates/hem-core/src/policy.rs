@@ -185,10 +185,7 @@ impl PolicyStore {
         input.validate()?;
         let issued_at = Utc::now();
         let lease = OfflineLease {
-            lease_id: format!(
-                "hol_{}",
-                hem_config::ids::generate_entropy_prefixed_ulid()
-            ),
+            lease_id: format!("hol_{}", hem_config::ids::generate_entropy_prefixed_ulid()),
             scope: input.scope,
             name: input.name,
             requester: input.requester,

@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, time::Duration};
 
+use hem_net::{Mesh, MeshConfig, MeshError};
 use tokio::sync::oneshot;
 use tonic::transport::Server;
 use tonic_health::{
@@ -7,7 +8,6 @@ use tonic_health::{
     server::health_reporter,
     ServingStatus as ServiceServingStatus,
 };
-use hem_net::{Mesh, MeshConfig, MeshError};
 
 const HEALTH_CHECK_PATH: &str = "/grpc.health.v1.Health/Check";
 const REGISTERED_SERVICE: &str = "valhall.smi.v1.Mesh";

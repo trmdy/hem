@@ -58,10 +58,7 @@ pub fn generate_master_key() -> MasterKey {
     let mut key_bytes = [0_u8; 32];
     OsRng.fill_bytes(&mut key_bytes);
     MasterKey {
-        key_id: format!(
-            "mk-{}",
-            hem_config::ids::generate_entropy_prefixed_ulid()
-        ),
+        key_id: format!("mk-{}", hem_config::ids::generate_entropy_prefixed_ulid()),
         key_bytes,
     }
 }
@@ -156,10 +153,7 @@ pub fn envelope_encrypt_for_nodes(
 
     Ok(EnvelopeEncryptedValue {
         alg: "hem-node-envelope-v1".to_string(),
-        data_key_id: format!(
-            "hdek_{}",
-            hem_config::ids::generate_entropy_prefixed_ulid()
-        ),
+        data_key_id: format!("hdek_{}", hem_config::ids::generate_entropy_prefixed_ulid()),
         nonce_b64: STANDARD_NO_PAD.encode(nonce),
         ciphertext_b64: STANDARD_NO_PAD.encode(ciphertext),
         wraps,

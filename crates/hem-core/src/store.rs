@@ -415,10 +415,7 @@ impl HemStore {
         normalize_subject("node_id", identity.node_id.as_str())?;
         let ledger = self.ledger_store()?;
         let input = LedgerOperationInput {
-            operation_id: format!(
-                "hop_{}",
-                hem_config::ids::generate_entropy_prefixed_ulid()
-            ),
+            operation_id: format!("hop_{}", hem_config::ids::generate_entropy_prefixed_ulid()),
             cluster_id: cluster_id.to_string(),
             node_id: identity.node_id.clone(),
             node_seq: ledger.node_high_watermark(identity.node_id.as_str())? + 1,

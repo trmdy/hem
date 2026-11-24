@@ -165,10 +165,7 @@ fn signed_peer_request<T>(
     cluster_id: &str,
     method: &str,
 ) -> Request<T> {
-    let nonce = format!(
-        "hpt_{}",
-        hem_config::ids::generate_entropy_prefixed_ulid()
-    );
+    let nonce = format!("hpt_{}", hem_config::ids::generate_entropy_prefixed_ulid());
     let timestamp_unix = Utc::now().timestamp();
     let statement = peer_transport_auth_statement_bytes(
         cluster_id,

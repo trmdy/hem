@@ -33,6 +33,8 @@ use hem_core::{
     ScopeResolutionContext, SecretInfo as CoreSecretInfo, SecretPolicyTier, SecretScope,
     SecretWithValues as CoreSecretWithValues, SetSecretInput, TokenClaims, TokenType,
 };
+use hem_events::topics;
+use hem_net::{Mesh, MeshConfig};
 use serde::Serialize;
 use tonic::{
     metadata::MetadataMap,
@@ -41,8 +43,6 @@ use tonic::{
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
-use hem_events::topics;
-use hem_net::{Mesh, MeshConfig};
 
 pub mod proto {
     #![allow(clippy::large_enum_variant)]
@@ -684,10 +684,7 @@ impl HemRuntimeService {
         }
         let ledger = store.ledger_store().map_err(status_from_hem)?;
         let keys = sorted_secret_keys(secret.values.keys());
-        let receipt_id = format!(
-            "hrr_{}",
-            hem_config::ids::generate_entropy_prefixed_ulid()
-        );
+        let receipt_id = format!("hrr_{}", hem_config::ids::generate_entropy_prefixed_ulid());
         if !self.cluster_runtime.is_master_node() {
             self.submit_read_receipts_to_master(
                 &ledger,
@@ -772,10 +769,7 @@ impl HemRuntimeService {
         payload_json: serde_json::Value,
     ) -> CoreLedgerOperationInput {
         CoreLedgerOperationInput {
-            operation_id: format!(
-                "hop_{}",
-                hem_config::ids::generate_entropy_prefixed_ulid()
-            ),
+            operation_id: format!("hop_{}", hem_config::ids::generate_entropy_prefixed_ulid()),
             cluster_id: cluster_id.to_string(),
             node_id: identity.node_id.clone(),
             node_seq,
@@ -1315,10 +1309,7 @@ impl HemRuntimeService {
             .latest_body_hash()
             .map_err(status_from_hem)?
             .unwrap_or_default();
-        let nonce = format!(
-            "hqn_{}",
-            hem_config::ids::generate_entropy_prefixed_ulid()
-        );
+        let nonce = format!("hqn_{}", hem_config::ids::generate_entropy_prefixed_ulid());
         let secret_scope = scope_label(&secret.info.scope);
         let secret_name = secret.info.name.as_str();
         let policy_decision = SecretPolicyTier::PeerQuorum.as_str();
@@ -4935,10 +4926,7 @@ fn signed_peer_transport_request<T>(
     cluster_id: &str,
     method: &str,
 ) -> hem_core::Result<Request<T>> {
-    let nonce = format!(
-        "hpt_{}",
-        hem_config::ids::generate_entropy_prefixed_ulid()
-    );
+    let nonce = format!("hpt_{}", hem_config::ids::generate_entropy_prefixed_ulid());
     let timestamp_unix = Utc::now().timestamp();
     let statement_bytes = peer_transport_auth_statement_bytes(
         cluster_id,

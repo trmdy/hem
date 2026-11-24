@@ -37,7 +37,11 @@ const SIGNATURES: &[AgentSignature] = &[
     AgentSignature {
         name: "claude-code",
         ancestors: &["claude"],
-        env_strong: &["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT"],
+        env_strong: &[
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_ENTRYPOINT",
+        ],
         env_weak_prefixes: &["CLAUDE_CODE_", "CLAUDE_"],
     },
     AgentSignature {
@@ -173,7 +177,10 @@ fn non_empty_env(name: &str) -> Option<String> {
 /// Walk the process ancestry via a single `ps` snapshot. Returns basenames,
 /// nearest first. Best-effort: any failure returns an empty list.
 fn ancestor_basenames() -> Vec<String> {
-    let Ok(output) = Command::new("ps").args(["-axo", "pid=,ppid=,comm="]).output() else {
+    let Ok(output) = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,comm="])
+        .output()
+    else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -390,7 +397,10 @@ mod tests {
     #[test]
     fn claude_ancestry_and_env_classify_claude_code() {
         let fp = classify(Evidence {
-            env_names: vec!["CLAUDECODE".to_string(), "CLAUDE_CODE_SESSION_ID".to_string()],
+            env_names: vec![
+                "CLAUDECODE".to_string(),
+                "CLAUDE_CODE_SESSION_ID".to_string(),
+            ],
             ancestors: vec!["zsh".to_string(), "claude".to_string(), "node".to_string()],
             session: Some("sess-123".to_string()),
             ..base_evidence()

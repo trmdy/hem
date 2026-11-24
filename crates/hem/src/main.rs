@@ -2803,10 +2803,7 @@ async fn collect_collision_quorum_agreement(
     let required_peer_acks = usize::from(config.quorum.saturating_sub(1));
     let requester_latest_position = ledger.latest_position()?;
     let requester_latest_body_hash_b64 = ledger.latest_body_hash()?.unwrap_or_default();
-    let nonce = format!(
-        "hca_{}",
-        hem_config::ids::generate_entropy_prefixed_ulid()
-    );
+    let nonce = format!("hca_{}", hem_config::ids::generate_entropy_prefixed_ulid());
     let mut accepted = Vec::new();
     let mut failures = Vec::new();
 
@@ -3011,10 +3008,7 @@ fn run_cluster_init(
     }
 
     fs::create_dir_all(data_dir.as_path())?;
-    let cluster_id = format!(
-        "hmc_{}",
-        hem_config::ids::generate_entropy_prefixed_ulid()
-    );
+    let cluster_id = format!("hmc_{}", hem_config::ids::generate_entropy_prefixed_ulid());
     let master_node_id = master_node_id.unwrap_or_else(|| node_id.clone());
     let config = ClusterConfig {
         enabled: true,
@@ -3766,10 +3760,7 @@ fn signed_peer_transport_request<T>(
     cluster_id: &str,
     method: &str,
 ) -> Result<Request<T>, Box<dyn std::error::Error>> {
-    let nonce = format!(
-        "hpt_{}",
-        hem_config::ids::generate_entropy_prefixed_ulid()
-    );
+    let nonce = format!("hpt_{}", hem_config::ids::generate_entropy_prefixed_ulid());
     let timestamp_unix = Utc::now().timestamp();
     let statement_bytes = peer_transport_auth_statement_bytes(
         cluster_id,

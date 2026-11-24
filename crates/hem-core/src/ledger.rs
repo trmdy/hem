@@ -769,10 +769,7 @@ impl LedgerStore {
         }
         let merkle_root = merkle_root(leaf_hashes.as_slice())?;
         let body = LedgerCheckpointBody {
-            checkpoint_id: format!(
-                "hcp_{}",
-                hem_config::ids::generate_entropy_prefixed_ulid()
-            ),
+            checkpoint_id: format!("hcp_{}", hem_config::ids::generate_entropy_prefixed_ulid()),
             cluster_id: cluster_id.to_string(),
             to_position,
             operation_count: i64::try_from(leaf_hashes.len()).map_err(|_| {
@@ -1240,10 +1237,7 @@ impl LedgerStore {
             payload_json["agreement"] = agreement;
         }
         let input = LedgerOperationInput {
-            operation_id: format!(
-                "hop_{}",
-                hem_config::ids::generate_entropy_prefixed_ulid()
-            ),
+            operation_id: format!("hop_{}", hem_config::ids::generate_entropy_prefixed_ulid()),
             cluster_id: collision.cluster_id.clone(),
             node_id: identity.node_id.clone(),
             node_seq: self.node_high_watermark(identity.node_id.as_str())? + 1,
@@ -1293,10 +1287,7 @@ impl LedgerStore {
             "hfork_{}",
             hem_config::ids::generate_entropy_prefixed_ulid()
         );
-        let operation_id = format!(
-            "hop_{}",
-            hem_config::ids::generate_entropy_prefixed_ulid()
-        );
+        let operation_id = format!("hop_{}", hem_config::ids::generate_entropy_prefixed_ulid());
         let created_at = Utc::now();
         let input = LedgerOperationInput {
             operation_id: operation_id.clone(),
@@ -1416,14 +1407,8 @@ impl LedgerStore {
                 ))
             })?;
         let replay_policy = "checkpoint_then_after_fork";
-        let replay_id = format!(
-            "hrpl_{}",
-            hem_config::ids::generate_entropy_prefixed_ulid()
-        );
-        let operation_id = format!(
-            "hop_{}",
-            hem_config::ids::generate_entropy_prefixed_ulid()
-        );
+        let replay_id = format!("hrpl_{}", hem_config::ids::generate_entropy_prefixed_ulid());
+        let operation_id = format!("hop_{}", hem_config::ids::generate_entropy_prefixed_ulid());
         let created_at = Utc::now();
         let operation_input = LedgerOperationInput {
             operation_id: operation_id.clone(),

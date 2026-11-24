@@ -2,10 +2,10 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use hem_net::{Mesh, MeshConfig};
 use std::{net::TcpListener, process::Stdio};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
-use hem_net::{Mesh, MeshConfig};
 
 fn test_nats_url() -> String {
     std::env::var("VALHALL_NET_TEST_NATS_URL")

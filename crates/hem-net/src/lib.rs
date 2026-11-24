@@ -42,10 +42,10 @@ mod subscription;
 
 use std::{sync::Arc, time::Duration};
 
+use hem_events::SystemEvent;
 use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 use tracing::{debug, info, warn};
-use hem_events::SystemEvent;
 
 pub use config::MeshConfig;
 pub use error::{MeshError, Result};
