@@ -1,8 +1,8 @@
 # Hem
 
-Hem is an agent-first secret vault. A local daemon (`hemd`) keeps secrets encrypted on disk and serves them over gRPC. The `hem` CLI, a TypeScript SDK, a desktop app (Hem Desk) and a Raycast extension talk to it. Reads can require human approval, every access is audited, and several machines can run `hemd` as a replicated cluster.
+Hem is an agent-first secret vault for developers and AI agents. A local daemon (`hemd`) keeps secrets encrypted on disk and serves them over gRPC. The `hem` CLI, a TypeScript SDK, a desktop app (Hem Desk) and a Raycast extension talk to it. Reads can require human approval, every access is audited, and several machines can run `hemd` as a replicated cluster.
 
-Hem was extracted from the [vlhl/valhall](https://github.com/vlhl/valhall) monorepo (commit `063bf7b`) with its git history. Hem Desk and the Raycast extension were merged in from their own repositories, also with history.
+Hem started as part of Valhall, a larger agent-infrastructure monorepo (`vlhl/valhall`), and was extracted with its git history. Hem Desk and the Raycast extension were merged in from their own repositories, also with history. Some runtime names still say `valhall` for compatibility with existing installs.
 
 ## Layout
 
@@ -45,6 +45,8 @@ TypeScript parts:
 
 ## Running hemd
 
+`hemd` needs a NATS server on `127.0.0.1:4222` (for example `nats-server` or `docker run -p 4222:4222 nats:2`).
+
 ```bash
 hemd --bind 127.0.0.1:50091 --data-dir ~/.valhall/hem
 hem init
@@ -52,7 +54,7 @@ hem health
 hem examples
 ```
 
-- Data dir: `--data-dir`, else `HEM_DATA_DIR`, else `~/.valhall/hem`. The launchd install on Tormod's machines uses `~/.valhall/system-daemons/data/hem`.
+- Data dir: `--data-dir`, else `HEM_DATA_DIR`, else `~/.valhall/hem`. A system-daemon install usually uses `~/.valhall/system-daemons/data/hem`.
 - CLI endpoint: `--endpoint` or `VALHALL_HEMD_ENDPOINT` (default `http://127.0.0.1:50091`).
 - CLI auth: `--token` or `VALHALL_HEM_TOKEN`, falling back to `operator.token` in the data dir.
 - On macOS `hemd` usually runs under launchd as `io.valhall.hemd`; restart it with `launchctl kickstart -k gui/$UID/io.valhall.hemd`.
@@ -60,3 +62,11 @@ hem examples
 Hem Desk and the Raycast extension call the `hem` CLI at `~/.valhall/system-daemons/bin/hem` by default (Hem Desk: `HEM_DESK_BINARY`; Raycast: the "Hem Binary" preference).
 
 Multi-machine setup is covered in `docs/1020-hem-multi-machine-deployment-runbook.md`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
