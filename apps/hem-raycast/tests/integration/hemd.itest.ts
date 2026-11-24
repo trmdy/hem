@@ -1,5 +1,5 @@
 // End-to-end test of src/hem/client.ts against an ISOLATED hemd on
-// 127.0.0.1:59091 with a disposable data dir (AGENT_BRIEF safety rules —
+// 127.0.0.1:59091 with a disposable data dir (safety rules —
 // never against the production daemon on 50091).
 import { ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";

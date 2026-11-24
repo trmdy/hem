@@ -1,6 +1,6 @@
 /**
  * Integration: boots an ISOLATED hemd on 127.0.0.1:59092 with a throwaway
- * data dir (never the production daemon on 50091 — see AGENT_BRIEF safety
+ * data dir (never the production daemon on 50091 — see the safety
  * rules) and drives the full IPC handler surface end to end:
  * init → set → list → get → reveal/copy → scan → gated read → approve/deny
  * → receipt retry → delete loop → audit. Tears the daemon down and removes

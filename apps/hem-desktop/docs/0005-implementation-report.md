@@ -2,7 +2,7 @@
 
 Status: v1 complete · 2026-07-05
 Implements [0001](0001-product-spec.md) + [0002](0002-technical-architecture.md)
-per `AGENT_BRIEF.md`; visuals from `design/hem-desk-v3.dc.html`.
+per the implementation brief; visuals from `design/hem-desk-v3.dc.html`.
 
 ## Quickstart
 

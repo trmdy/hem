@@ -1,7 +1,7 @@
 # 0002 — Implementation Report
 
 Status: v1 complete · 2026-07-04
-Implements: [0001-extension-spec.md](0001-extension-spec.md), executed per `AGENT_BRIEF.md`.
+Implements: [0001-extension-spec.md](0001-extension-spec.md).
 
 ## Quickstart (10 lines)
 

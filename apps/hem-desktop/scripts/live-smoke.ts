@@ -1,6 +1,6 @@
 /**
  * Read-only smoke against the production daemon, restricted to the
- * AGENT_BRIEF allowlist: Health, ListSecrets, GetSecretInfo, ListGroups.
+ * Read-only allowlist: Health, ListSecrets, GetSecretInfo, ListGroups.
  * Prints counts and section names only — never values, never mutations.
  */
 import { join } from 'node:path';
