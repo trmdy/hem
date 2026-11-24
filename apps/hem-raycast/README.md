@@ -1,6 +1,6 @@
 # hem-raycast
 
-Personal Raycast extension for [Hem](../valhall/crates/hem) — the Valhall secret vault daemon.
+Personal Raycast extension for [Hem](../../crates/hem) — the Valhall secret vault daemon.
 
 Hem is powerful but CLI-only. This extension makes the everyday 95% instant:
 find a secret, copy a value, add a new one, check the mesh — without leaving
@@ -58,7 +58,7 @@ npm test                 # vitest unit tests (parsers, token discovery, refs, .e
 npm run test:integration # boots an ISOLATED hemd on 127.0.0.1:59091, exercises
                          # the client end to end (init → set → get → delete →
                          # approval → receipt retry), tears down
-npm run sync-proto       # re-copy hem.proto from ../valhall + record git rev
+npm run sync-proto       # re-copy hem.proto from the repo root proto/ + record git rev
 ```
 
 The integration suite never touches the production daemon on port 50091; it

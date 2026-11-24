@@ -461,8 +461,7 @@ function resolveDefaultProtoPath(): string {
   );
   const candidates = [
     moduleProtoPath,
-    resolve(process.cwd(), "packages/hem/proto/valhall/hem/v1/hem.proto"),
-    resolve(process.cwd(), "sdks/typescript/packages/hem/proto/valhall/hem/v1/hem.proto"),
+    resolve(process.cwd(), "sdk/ts/proto/valhall/hem/v1/hem.proto"),
     resolve(process.cwd(), "proto/valhall/hem/v1/hem.proto"),
   ];
 

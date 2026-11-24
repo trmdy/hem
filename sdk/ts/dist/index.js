@@ -185,8 +185,7 @@ function resolveDefaultProtoPath() {
     const moduleProtoPath = fileURLToPath(new URL("../proto/valhall/hem/v1/hem.proto", import.meta.url));
     const candidates = [
         moduleProtoPath,
-        resolve(process.cwd(), "packages/hem/proto/valhall/hem/v1/hem.proto"),
-        resolve(process.cwd(), "sdks/typescript/packages/hem/proto/valhall/hem/v1/hem.proto"),
+        resolve(process.cwd(), "sdk/ts/proto/valhall/hem/v1/hem.proto"),
         resolve(process.cwd(), "proto/valhall/hem/v1/hem.proto"),
     ];
     for (const candidate of candidates) {

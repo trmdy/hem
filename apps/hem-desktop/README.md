@@ -1,6 +1,6 @@
 # hem-desktop — "Hem Desk"
 
-A keyboard-first macOS desktop app for [Hem](../valhall/crates/hem), the
+A keyboard-first macOS desktop app for [Hem](../../crates/hem), the
 Valhall secret vault and mesh. Black-on-white, fast, and built for one
 operator.
 
