@@ -8,6 +8,11 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    services:
+      nats:
+        image: nats:2
+        ports:
+          - 4222:4222
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
