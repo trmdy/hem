@@ -1,0 +1,119 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "hem",
+  "title": "Hem",
+  "description": "Search, copy, and manage Hem vault secrets and mesh status from Raycast.",
+  "icon": "icon.png",
+  "author": "trmd",
+  "license": "MIT",
+  "platforms": [
+    "macOS"
+  ],
+  "commands": [
+    {
+      "name": "search-secrets",
+      "title": "Search Secrets",
+      "description": "Fuzzy-find secrets across all scopes; copy values concealed.",
+      "mode": "view"
+    },
+    {
+      "name": "add-secret",
+      "title": "Add Secret",
+      "description": "Create a secret with key/value pairs or .env paste import.",
+      "mode": "view"
+    },
+    {
+      "name": "cluster-status",
+      "title": "Cluster Status",
+      "description": "Per-node mesh health, lag, checkpoints, quorum risk.",
+      "mode": "view"
+    },
+    {
+      "name": "pending-approvals",
+      "title": "Pending Approvals",
+      "description": "Approve or deny pending Hem access requests.",
+      "mode": "view"
+    },
+    {
+      "name": "audit-log",
+      "title": "Audit Log",
+      "description": "Recent vault activity, newest first.",
+      "mode": "view"
+    },
+    {
+      "name": "scan-clipboard",
+      "title": "Scan Clipboard for Secrets",
+      "description": "Check clipboard contents for known secret values before pasting.",
+      "mode": "no-view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "endpoint",
+      "type": "textfield",
+      "required": false,
+      "title": "Daemon Endpoint",
+      "description": "hemd gRPC endpoint.",
+      "default": "http://127.0.0.1:50091"
+    },
+    {
+      "name": "token",
+      "type": "password",
+      "required": false,
+      "title": "Operator Token",
+      "description": "Leave empty to auto-discover from the standard token file locations.",
+      "placeholder": "auto-discover from disk"
+    },
+    {
+      "name": "hemBinary",
+      "type": "textfield",
+      "required": false,
+      "title": "Hem Binary",
+      "description": "Path to the hem CLI, used for cluster commands only.",
+      "default": "~/.valhall/system-daemons/bin/hem"
+    },
+    {
+      "name": "clipboardClearSeconds",
+      "type": "textfield",
+      "required": false,
+      "title": "Clipboard Clear (Seconds)",
+      "description": "Clear copied secret values after this many seconds. 0 = never clear.",
+      "default": "90"
+    },
+    {
+      "name": "primaryKeyGuess",
+      "type": "textfield",
+      "required": false,
+      "title": "Primary Key Guess",
+      "description": "Ordered, comma-separated key candidates for the Copy Primary Value action.",
+      "default": "api_key,token,key,password,secret"
+    }
+  ],
+  "scripts": {
+    "build": "ray build -e dist",
+    "dev": "ray develop",
+    "lint": "eslint src && prettier --check src && tsc --noEmit",
+    "lint:ray": "ray lint",
+    "fix-lint": "eslint src --fix && prettier --write src",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "sync-proto": "node scripts/sync-proto.mjs",
+    "gen-icon": "node scripts/gen-icon.mjs"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.4",
+    "@grpc/proto-loader": "^0.8.1",
+    "@raycast/api": "^1.104.21",
+    "@raycast/utils": "^2.2.7",
+    "execa": "^9.6.1"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^2.0.4",
+    "@types/node": "^22.13.10",
+    "@types/react": "^19.0.10",
+    "eslint": "^9.22.0",
+    "prettier": "^3.5.3",
+    "typescript": "^5.8.2",
+    "vitest": "^4.1.9"
+  }
+}

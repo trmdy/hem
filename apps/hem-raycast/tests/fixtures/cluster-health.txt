@@ -1,0 +1,33 @@
+peer_health node_id=hmn_alder01 status=caught_up endpoint=http://192.0.2.250:50091 cursor_position=7882 cursor_hash=krnvPuOdtay0xfpKr7cQ/bJ54xfIuoCiaVKEvJrTn3E lag=0 last_seen=2026-07-04T18:06:03.771891+00:00 error=-
+peer_health node_id=hmn_birch02 status=caught_up endpoint=http://192.0.2.185:50091 cursor_position=7882 cursor_hash=krnvPuOdtay0xfpKr7cQ/bJ54xfIuoCiaVKEvJrTn3E lag=0 last_seen=2026-07-04T18:06:12.663476+00:00 error=-
+peer_health node_id=hmn_cedar03 status=caught_up endpoint=http://192.0.2.137:50091 cursor_position=7882 cursor_hash=krnvPuOdtay0xfpKr7cQ/bJ54xfIuoCiaVKEvJrTn3E lag=0 last_seen=2026-07-04T18:06:19.490775+00:00 error=-
+peer_health node_id=hmn_dogwood04 status=caught_up endpoint=http://192.0.2.85:50091 cursor_position=7882 cursor_hash=krnvPuOdtay0xfpKr7cQ/bJ54xfIuoCiaVKEvJrTn3E lag=0 last_seen=2026-07-04T18:06:12.698238+00:00 error=-
+peer_health node_id=hmn_elm05 status=lagging endpoint=http://192.0.2.117:50091 cursor_position=1315 cursor_hash=q04uP3o9hX8JOTfdUz7yBoi2jApzm9gEuEHIEHvmIJo lag=6567 last_seen=2026-06-03T08:16:16.779731+00:00 error=-
+cluster_health=true
+cluster_health_status=warning
+health_exit_code=1
+cluster_enabled=true
+data_dir=/home/user/.valhall/system-daemons/data/hem
+cluster_id=hmc_democluster000000000000000
+node_id=hmn_main
+listen=http://192.0.2.206:50091
+quorum=1
+configured_peers=5
+latest_position=7882
+latest_body_hash=krnvPuOdtay0xfpKr7cQ/bJ54xfIuoCiaVKEvJrTn3E
+ledger_ok=true
+integrity_issues=0
+error_issues=0
+divergence_issues=0
+collisions=0
+healthy_peers=4
+lagging_peers=1
+offline_peers=0
+unknown_peers=0
+divergent_peers=0
+quorum_risk=false
+checkpoint_status=quorum_met
+latest_checkpoint_id=hcp_democheckpoint000000000000
+latest_checkpoint_position=7882
+latest_checkpoint_cosignatures=1
+sync_errors=0
